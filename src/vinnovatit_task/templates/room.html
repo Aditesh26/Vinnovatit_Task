@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Room {{ room_code }} — Watch Party</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body class="room-page" data-room-code="{{ room_code }}">
+    <main class="room-shell">
+      <nav>
+        <a class="brand" href="/">watch<span>party</span></a
+        ><span id="connection-status" class="status">Connecting…</span>
+      </nav>
+      <section class="room-header">
+        <div>
+          <p class="eyebrow">YOUR WATCH ROOM</p>
+          <h1>Room <span>{{ room_code }}</span></h1>
+        </div>
+        <button id="copy-link" class="secondary">Copy invite link</button>
+      </section>
+      <section class="watch-layout">
+        <div class="player-placeholder">
+          <div class="play-icon">▶</div>
+          <p>Playback is coming in the next milestone.</p>
+          <small
+            >For now, invite your group and make sure everyone is here.</small
+          >
+        </div>
+        <aside class="participants-panel">
+          <div class="panel-heading">
+            <h2>In the room</h2>
+            <span id="participant-count">0</span>
+          </div>
+          <ul id="participant-list" aria-live="polite"></ul>
+          <p id="room-message" class="room-message" aria-live="polite"></p>
+        </aside>
+      </section>
+      <section class="share-code">
+        <p>Share this code</p>
+        <strong>{{ room_code }}</strong
+        ><span>Anyone with this code can join from the home page.</span>
+      </section>
+    </main>
+    <script src="/static/room.js"></script>
+  </body>
+</html>

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Watch Party — Find your people</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body class="landing">
+    <main class="landing-shell">
+      <nav>
+        <a class="brand" href="/">watch<span>party</span></a
+        ><span class="badge">COLLEGE CLUB EDITION</span>
+      </nav>
+      <section class="hero">
+        <p class="eyebrow">MOVIES ARE BETTER TOGETHER</p>
+        <h1>Press play.<br /><em>Stay in sync.</em></h1>
+        <p class="intro">
+          A shared room for the film club, your flatmates, or everyone who still
+          has opinions about the ending.
+        </p>
+        <div class="action-grid">
+          <form id="create-form" class="card">
+            <h2>Start a party</h2>
+            <label for="host-name">Your name</label
+            ><input
+              id="host-name"
+              name="name"
+              maxlength="32"
+              placeholder="e.g. Aditi"
+              autocomplete="name"
+            /><button type="submit">Create a room <span>→</span></button>
+          </form>
+          <form id="join-form" class="card muted-card">
+            <h2>Join the room</h2>
+            <label for="room-code">Room code</label
+            ><input
+              id="room-code"
+              name="code"
+              maxlength="6"
+              placeholder="ABC123"
+              autocomplete="off"
+              required
+            /><label for="guest-name">Your name</label
+            ><input
+              id="guest-name"
+              name="name"
+              maxlength="32"
+              placeholder="e.g. Rohan"
+              autocomplete="name"
+            /><button type="submit">Join party <span>→</span></button>
+          </form>
+        </div>
+        <p id="form-error" class="form-error" role="alert"></p>
+      </section>
+      <p class="footer-note">
+        Rooms are private to people with the invite link or code.
+      </p>
+    </main>
+    <script src="/static/landing.js"></script>
+  </body>
+</html>

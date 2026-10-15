@@ -1,2 +1,5 @@
-def main() -> None:
-    print("Hello from vinnovatit-task!")
+"""Watch Party application package."""
+
+from .main import app, main
+
+__all__ = ["app", "main"]
