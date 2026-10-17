@@ -328,20 +328,25 @@ test("room identity is saved per normalized room code and reused on refresh", ()
   assert.equal(saved.participant_name, "Guest");
 
   const refreshed = createGuestPage("ABC123", storage);
-  assert.match(refreshed.socket.url, /participant_id=guest-id/);
-  assert.match(refreshed.socket.url, /name=Guest/);
+  assert.equal(refreshed.socket.url, "ws://localhost:8000/ws/rooms/ABC123");
+  assert.deepEqual(refreshed.socket.sent[0], {
+    type: "room_connect", participant_id: "guest-id", name: "Guest", recovery_token: null,
+  });
 
   storage.set("watch-party:identity:ROOM99", JSON.stringify({ participant_id: "second-room-id", participant_name: "Other" }));
   const otherRoom = createGuestPage("ROOM99", storage);
-  assert.match(otherRoom.socket.url, /participant_id=second-room-id/);
-  assert.match(otherRoom.socket.url, /name=Other/);
+  assert.equal(otherRoom.socket.url, "ws://localhost:8000/ws/rooms/ROOM99");
+  assert.deepEqual(otherRoom.socket.sent[0], {
+    type: "room_connect", participant_id: "second-room-id", name: "Other", recovery_token: null,
+  });
   assert.equal(JSON.parse(storage.get("watch-party:identity:ABC123")).participant_id, "guest-id");
 });
 
 test("malformed room identity storage falls back to a fresh session without throwing", () => {
   const storage = new Map([["watch-party:identity:ABC123", "not-json"]]);
   const page = createGuestPage("ABC123", storage);
-  assert.match(page.socket.url, /participant_id=guest-id/);
+  assert.equal(page.socket.url, "ws://localhost:8000/ws/rooms/ABC123");
+  assert.equal(page.socket.sent[0].participant_id, "guest-id");
   page.socket.onmessage({ data: JSON.stringify({ type: "room_state", host_id: null, participants: [], polls: [] }) });
   assert.equal(JSON.parse(storage.get("watch-party:identity:ABC123")).participant_id, "guest-id");
 });

@@ -127,9 +127,34 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
         await websocket.close(code=4404, reason="Room code not found")
         return
 
-    participant_id = websocket.query_params.get("participant_id") or str(uuid4())
-    participant_name = websocket.query_params.get("name", "Guest")
-    recovery_token = websocket.query_params.get("recovery_token")
+    # The first WebSocket frame carries identity and (for a host reconnect) its
+    # proof. Keeping the secret out of the URL prevents it appearing in normal
+    # Uvicorn access logs. Deployments must still use wss:// to encrypt frames.
+    await websocket.accept()
+    try:
+        raw_identity = await websocket.receive_text()
+    except WebSocketDisconnect:
+        return
+    try:
+        identity_message = json.loads(raw_identity)
+    except json.JSONDecodeError:
+        await websocket.close(code=4400, reason="Invalid connection identity")
+        return
+    if (
+        not isinstance(identity_message, dict)
+        or set(identity_message) != {"type", "participant_id", "name", "recovery_token"}
+        or identity_message.get("type") != "room_connect"
+        or not isinstance(identity_message.get("participant_id"), str)
+        or not identity_message["participant_id"].strip()
+        or not isinstance(identity_message.get("name"), str)
+        or not (identity_message.get("recovery_token") is None
+                or isinstance(identity_message.get("recovery_token"), str))
+    ):
+        await websocket.close(code=4400, reason="Invalid connection identity")
+        return
+    participant_id = identity_message["participant_id"]
+    participant_name = identity_message["name"]
+    recovery_token = identity_message.get("recovery_token")
     try:
         # Resolve identity/name before registering a socket, so a rejected
         # duplicate WebSocket cannot appear in the room's connection manager.
@@ -142,7 +167,9 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
     except HostRecoveryError as error:
         await websocket.close(code=4403, reason=str(error))
         return
-    await connections.connect(room_code, participant_id, websocket)
+    await connections.connect(
+        room_code, participant_id, websocket, already_accepted=True
+    )
     await connections.send(websocket, {"type": "room_state", **room.snapshot(participant_id)})
     if joined:
         await connections.broadcast(

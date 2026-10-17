@@ -12,7 +12,11 @@ function readStoredIdentity() {
     return null;
 }
 function readHostRecoveryToken() {
-    try { return localStorage.getItem(recoveryStorageKey) || ""; }
+    try {
+        const token = localStorage.getItem(recoveryStorageKey);
+        if (token) return token;
+    } catch { /* Use per-tab storage when persistent storage is unavailable. */ }
+    try { return sessionStorage.getItem(recoveryStorageKey) || ""; }
     catch { return ""; }
 }
 function saveStoredIdentity(id, name) {
@@ -22,7 +26,7 @@ function saveStoredIdentity(id, name) {
 let storedRoom = readStoredIdentity();
 const participantId = storedRoom?.participant_id || params.get("participant_id") || crypto.randomUUID();
 const participantName = storedRoom?.participant_name || params.get("name") || "Guest";
-let hostRecoveryToken = readHostRecoveryToken() || params.get("recovery_token") || "";
+let hostRecoveryToken = readHostRecoveryToken();
 const status = document.querySelector("#connection-status");
 const list = document.querySelector("#participant-list");
 const count = document.querySelector("#participant-count");
@@ -376,13 +380,14 @@ function renderVideoCredit(movie) {
 function connect() {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     restoreOnNextPlaybackState = true;
-    const credentials = new URLSearchParams({ participant_id: participantId, name: participantName });
-    if (hostRecoveryToken) credentials.set("recovery_token", hostRecoveryToken);
-    socket = new WebSocket(`${protocol}://${window.location.host}/ws/rooms/${roomCode}?${credentials.toString()}`);
+    socket = new WebSocket(`${protocol}://${window.location.host}/ws/rooms/${roomCode}`);
     socket.onopen = () => {
-        if (params.has("recovery_token") && window.history?.replaceState) {
-            window.history.replaceState(null, "", `/rooms/${normalizedRoomCode}`);
-        }
+        socket.send(JSON.stringify({
+            type: "room_connect",
+            participant_id: participantId,
+            name: participantName,
+            recovery_token: hostRecoveryToken || null,
+        }));
         status.textContent = "Connected";
         status.classList.add("online");
         if (!startSyncedPlaybackButton.hidden) showSyncedPlaybackButton();
@@ -400,6 +405,7 @@ function connect() {
             if (data.host_id !== participantId) {
                 hostRecoveryToken = "";
                 try { localStorage.removeItem(recoveryStorageKey); } catch { /* Storage can be disabled. */ }
+                try { sessionStorage.removeItem(recoveryStorageKey); } catch { /* Storage can be disabled. */ }
             }
             renderParticipants(data.participants, data.host_id);
             renderPlaylist(data.playlist || []);
@@ -408,7 +414,11 @@ function connect() {
         }
         if (data.type === "host_recovery_credential" && typeof data.token === "string") {
             hostRecoveryToken = data.token;
-            try { localStorage.setItem(recoveryStorageKey, hostRecoveryToken); } catch { /* Host can use this connection; refresh recovery may be unavailable. */ }
+            try { localStorage.setItem(recoveryStorageKey, hostRecoveryToken); }
+            catch {
+                try { sessionStorage.setItem(recoveryStorageKey, hostRecoveryToken); }
+                catch { /* This connection remains host; recovery may be unavailable. */ }
+            }
         }
         if (data.type === "playback_state") receivePlaybackState(data);
         if (data.type === "participant_joined") message.textContent = `${data.participant.name} joined the room.`;
@@ -439,6 +449,7 @@ function connect() {
                 localStorage.removeItem(identityStorageKey);
                 localStorage.removeItem(recoveryStorageKey);
             } catch { /* Leave the recovery page available even if cleanup fails. */ }
+            try { sessionStorage.removeItem(recoveryStorageKey); } catch { /* Storage may be unavailable. */ }
             return;
         }
         if (!startSyncedPlaybackButton.hidden) showSyncedPlaybackButton();

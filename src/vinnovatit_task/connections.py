@@ -12,9 +12,15 @@ class ConnectionManager:
         self._connections: dict[str, dict[str, WebSocket]] = defaultdict(dict)
 
     async def connect(
-        self, room_code: str, participant_id: str, websocket: WebSocket
+        self,
+        room_code: str,
+        participant_id: str,
+        websocket: WebSocket,
+        *,
+        already_accepted: bool = False,
     ) -> None:
-        await websocket.accept()
+        if not already_accepted:
+            await websocket.accept()
         existing = self._connections[room_code].get(participant_id)
         self._connections[room_code][participant_id] = websocket
         if existing is not None and existing is not websocket:

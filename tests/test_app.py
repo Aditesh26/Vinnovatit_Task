@@ -1,6 +1,8 @@
 import pytest
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -18,11 +20,43 @@ from vinnovatit_task.room_store import (
     estimate_playback_position,
 )
 
+_host_recovery_tokens: dict[str, str] = {}
+_raw_websocket_connect = TestClient.websocket_connect
+
 
 def create_room(client: TestClient, name: str = "Aditi") -> dict[str, str]:
     response = client.post("/api/rooms", json={"name": name})
     assert response.status_code == 201
-    return response.json()
+    room = response.json()
+    _host_recovery_tokens[room["participant_id"]] = room["host_recovery_token"]
+    return room
+
+
+@pytest.fixture(autouse=True)
+def authenticate_test_websockets(monkeypatch):
+    """Make test sockets follow the browser's first-frame identity protocol."""
+    from contextlib import contextmanager
+
+    def connect(client, url, *args, **kwargs):
+        raw_context = _raw_websocket_connect(client, url, *args, **kwargs)
+
+        @contextmanager
+        def authenticated_context():
+            with raw_context as socket:
+                query = parse_qs(urlsplit(url).query)
+                participant_id = query.get("participant_id", [str(uuid4())])[0]
+                name = query.get("name", ["Guest"])[0]
+                socket.send_json({
+                    "type": "room_connect",
+                    "participant_id": participant_id,
+                    "name": name,
+                    "recovery_token": _host_recovery_tokens.get(participant_id),
+                })
+                yield socket
+
+        return authenticated_context()
+
+    monkeypatch.setattr(TestClient, "websocket_connect", connect)
 
 
 def consume_initial_room_messages(socket) -> None:
@@ -43,8 +77,7 @@ def connect_guest(client: TestClient, room: dict[str, str], participant_name: st
 def host_ws_url(room: dict[str, str], name: str | None = None) -> str:
     suffix = f"&name={name}" if name else ""
     return (
-        f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
-        f"&recovery_token={room['host_recovery_token']}{suffix}"
+        f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}{suffix}"
     )
 
 
@@ -175,8 +208,8 @@ def test_new_websocket_identity_with_duplicate_name_is_rejected() -> None:
             with pytest.raises(WebSocketDisconnect) as error:
                 with client.websocket_connect(
                     f"/ws/rooms/{room['code']}?participant_id=new-id&name=hOST"
-                ):
-                    pass
+                ) as duplicate_socket:
+                    duplicate_socket.receive_json()
     assert error.value.code == 4409
 
 
@@ -606,20 +639,24 @@ def test_host_disconnect_is_hostless_until_same_identity_reconnects() -> None:
 def test_host_recovery_requires_room_scoped_secret_not_participant_id() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
+        assert "recovery_token" not in host_ws_url(room, "Host")
         with pytest.raises(WebSocketDisconnect) as no_token:
-            with client.websocket_connect(
+            with _raw_websocket_connect(
+                client,
                 f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
-            ):
-                pass
+            ) as socket:
+                socket.send_json({"type": "room_connect", "participant_id": room["participant_id"], "name": "Host", "recovery_token": None})
+                socket.receive_json()
         assert no_token.value.code == 4403
 
         other_room = create_room(client, "Other")
         with pytest.raises(WebSocketDisconnect) as wrong_room_token:
-            with client.websocket_connect(
+            with _raw_websocket_connect(
+                client,
                 f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
-                f"&recovery_token={other_room['host_recovery_token']}"
-            ):
-                pass
+            ) as socket:
+                socket.send_json({"type": "room_connect", "participant_id": room["participant_id"], "name": "Host", "recovery_token": other_room["host_recovery_token"]})
+                socket.receive_json()
         assert wrong_room_token.value.code == 4403
 
 
@@ -645,7 +682,8 @@ def test_old_host_reconnects_as_guest_after_host_transfer() -> None:
                 new_host.close()
 
         assert recovery_credential
-        with client.websocket_connect(f"{guest_url}&recovery_token={recovery_credential}") as recovered_new_host:
+        _host_recovery_tokens[guest["participant_id"]] = recovery_credential
+        with client.websocket_connect(guest_url) as recovered_new_host:
             assert recovered_new_host.receive_json()["host_id"] == guest["participant_id"]
             with client.websocket_connect(host_url) as former_reconnected:
                 state = former_reconnected.receive_json()

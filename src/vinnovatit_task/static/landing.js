@@ -21,9 +21,15 @@ function saveRoomIdentity(room) {
             participant_id: room.participant_id,
             participant_name: room.participant_name,
         }));
-        if (room.host_recovery_token) localStorage.setItem(hostRecoveryKey(code), room.host_recovery_token);
-        return true;
-    } catch { /* Private browsing/storage limits must not prevent room entry. */ return false; }
+    } catch { /* The participant ID remains in the non-secret room URL. */ }
+    if (room.host_recovery_token) {
+        try { localStorage.setItem(hostRecoveryKey(code), room.host_recovery_token); }
+        catch {
+            try { sessionStorage.setItem(hostRecoveryKey(code), room.host_recovery_token); }
+            catch { return false; }
+        }
+    }
+    return true;
 }
 
 async function requestRoom(url, body) {
@@ -38,9 +44,8 @@ function enterRoom(room) {
     const destination = new URL(room.room_url, window.location.origin);
     destination.searchParams.set("participant_id", room.participant_id);
     if (!saved && room.host_recovery_token) {
-        // Use a one-navigation fallback when storage is blocked; room.js removes
-        // this credential from the visible URL after the socket opens.
-        destination.searchParams.set("recovery_token", room.host_recovery_token);
+        showError("Browser storage is unavailable, so host recovery cannot be saved. Enable storage and try again.");
+        return;
     }
     window.location.assign(destination.href);
 }
