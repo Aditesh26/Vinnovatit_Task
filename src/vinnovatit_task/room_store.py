@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from secrets import choice
 from string import ascii_uppercase, digits
+from time import time
 from uuid import uuid4
 
 ROOM_CODE_ALPHABET = ascii_uppercase + digits
@@ -25,9 +26,36 @@ class Room:
     code: str
     host_id: str
     participants: dict[str, Participant] = field(default_factory=dict)
+    playback_position: float = 0.0
+    playback_paused: bool = True
+    playback_updated_at: float = field(default_factory=time)
 
     def snapshot(self) -> dict[str, object]:
         return {"code": self.code, "host_id": self.host_id, "participants": [p.as_dict() for p in self.participants.values()]}
+
+    def playback_snapshot(self, now: float | None = None) -> dict[str, object]:
+        """Return playback state with an estimated position at the snapshot time."""
+        snapshot_time = time() if now is None else now
+        position = self.playback_position
+        if not self.playback_paused:
+            position += max(0.0, snapshot_time - self.playback_updated_at)
+        return {
+            "type": "playback_state",
+            "position": position,
+            "paused": self.playback_paused,
+            "updated_at": snapshot_time,
+        }
+
+    def set_playback(self, action: str, position: float, now: float | None = None) -> dict[str, object]:
+        """Apply one validated command and return the new server state."""
+        updated_at = time() if now is None else now
+        self.playback_position = position
+        if action == "play":
+            self.playback_paused = False
+        elif action == "pause":
+            self.playback_paused = True
+        self.playback_updated_at = updated_at
+        return self.playback_snapshot(updated_at)
 
 
 class RoomNotFoundError(KeyError):
@@ -75,6 +103,10 @@ class RoomStore:
         if participant is not None:
             participant.connected = False
         return room
+
+    def set_playback(self, code: str, action: str, position: float) -> dict[str, object]:
+        """Update playback for one room and return its authoritative state."""
+        return self.get_room(code).set_playback(action, position)
 
     def _new_code(self) -> str:
         while True:

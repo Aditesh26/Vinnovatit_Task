@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Room {{ room_code }} — Watch Party</title>
+    <title>Room {{ room_code }} - Watch Party</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body class="room-page" data-room-code="{{ room_code }}">
     <main class="room-shell">
       <nav>
         <a class="brand" href="/">watch<span>party</span></a
-        ><span id="connection-status" class="status">Connecting…</span>
+        ><span id="connection-status" class="status">Connecting...</span>
       </nav>
       <section class="room-header">
         <div>
@@ -20,12 +20,13 @@
         <button id="copy-link" class="secondary">Copy invite link</button>
       </section>
       <section class="watch-layout">
-        <div class="player-placeholder">
-          <div class="play-icon">▶</div>
-          <p>Playback is coming in the next milestone.</p>
-          <small
-            >For now, invite your group and make sure everyone is here.</small
-          >
+        <div class="player-card">
+          <video id="shared-video" controls preload="metadata" playsinline>
+            <source src="https://media.w3.org/2010/05/sintel/trailer.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+          </video>
+          <p id="playback-notice" class="playback-notice" role="status" aria-live="polite"></p>
+          <small class="video-credit">Sample: <a href="https://www.sintel.org/" target="_blank" rel="noreferrer">Sintel trailer</a>, Blender Foundation, <a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noreferrer">CC BY 3.0</a>.</small>
         </div>
         <aside class="participants-panel">
           <div class="panel-heading">

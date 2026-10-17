@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from uuid import uuid4
 
@@ -105,6 +106,7 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
         await connections.broadcast(
             room_code, {"type": "room_state", **room.snapshot()}
         )
+    await connections.send(websocket, room.playback_snapshot())
 
     try:
         while True:
@@ -117,12 +119,46 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
                     {"type": "error", "detail": "Messages must be valid JSON."},
                 )
                 continue
-            if not isinstance(message, dict) or message.get("type") != "ping":
+            if not isinstance(message, dict):
                 await connections.send(
-                    websocket, {"type": "error", "detail": "Unsupported message."}
+                    websocket,
+                    {"type": "error", "detail": "Messages must be JSON objects."},
                 )
                 continue
-            await connections.send(websocket, {"type": "pong"})
+            if message == {"type": "ping"}:
+                await connections.send(websocket, {"type": "pong"})
+                continue
+            if message.get("type") != "playback_command":
+                await connections.send(
+                    websocket, {"type": "error", "detail": "Unsupported message type."}
+                )
+                continue
+
+            action = message.get("action")
+            position = message.get("position")
+            valid_position = (
+                isinstance(position, (int, float))
+                and not isinstance(position, bool)
+                and 0 <= position <= 86_400
+                and (isinstance(position, int) or math.isfinite(position))
+            )
+            if (
+                set(message) != {"type", "action", "position"}
+                or not isinstance(action, str)
+                or action not in {"play", "pause", "seek"}
+                or not valid_position
+            ):
+                await connections.send(
+                    websocket,
+                    {
+                        "type": "error",
+                        "detail": "Playback commands need action play, pause, or seek and a position from 0 to 86400 seconds.",
+                    },
+                )
+                continue
+
+            playback_state = store.set_playback(room_code, action, float(position))
+            await connections.broadcast(room_code, playback_state)
     except WebSocketDisconnect:
         pass
     finally:
