@@ -6,7 +6,10 @@
     <title>Room {{ room_code }} - Watch Party</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
-  <body class="room-page" data-room-code="{{ room_code }}">
+  <body class="room-page" data-room-code="{{ room_code }}"
+    data-drift-threshold-seconds="{{ drift_threshold_seconds }}"
+    data-drift-check-interval-ms="{{ drift_check_interval_ms }}"
+    data-drift-correction-cooldown-ms="{{ drift_correction_cooldown_ms }}">
     <main class="room-shell">
       <nav>
         <a class="brand" href="/">watch<span>party</span></a

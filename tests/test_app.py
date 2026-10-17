@@ -1,9 +1,14 @@
 import pytest
+from concurrent.futures import ThreadPoolExecutor
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from vinnovatit_task.main import app
-from vinnovatit_task.room_store import RoomStore
+from vinnovatit_task.room_store import (
+    RoomStore,
+    calculate_playback_drift,
+    estimate_playback_position,
+)
 
 
 def create_room(client: TestClient, name: str = "Aditi") -> dict[str, str]:
@@ -94,18 +99,35 @@ def test_playback_state_estimates_position_while_playing() -> None:
     playing = room.set_playback("play", position=12.5, now=100.0)
     estimated = room.playback_snapshot(now=103.25)
 
-    assert playing == {"type": "playback_state", "position": 12.5, "paused": False, "updated_at": 100.0}
+    assert playing == {
+        "type": "playback_state",
+        "position": 12.5,
+        "paused": False,
+        "updated_at": 100.0,
+        "revision": 1,
+        "action": "play",
+    }
     assert estimated["position"] == 15.75
     assert estimated["paused"] is False
 
     paused = room.set_playback("pause", position=15.75, now=104.0)
     assert paused["position"] == 15.75
     assert paused["paused"] is True
+    assert paused["revision"] == 2
 
     resumed = room.set_playback("play", position=20.0, now=105.0)
     seeked_while_playing = room.set_playback("seek", position=7.0, now=106.0)
     assert resumed["paused"] is False
     assert seeked_while_playing["paused"] is False
+    assert seeked_while_playing["revision"] == 4
+
+
+def test_drift_calculation_uses_estimated_authoritative_position() -> None:
+    target = estimate_playback_position(20.0, False, updated_at=100.0, now=103.0)
+    assert target == 23.0
+    assert calculate_playback_drift(23.4, 20.0, False, 100.0, 103.0) == pytest.approx(0.4)
+    assert calculate_playback_drift(21.5, 20.0, False, 100.0, 103.0) == pytest.approx(-1.5)
+    assert calculate_playback_drift(10.0, 10.0, True, 100.0, 103.0) == 0
 
 
 def test_play_pause_and_seek_commands_broadcast_authoritative_state() -> None:
@@ -138,6 +160,125 @@ def test_play_pause_and_seek_commands_broadcast_authoritative_state() -> None:
                     assert first_state["type"] == "playback_state"
                     assert first_state["position"] == position
                     assert first_state["paused"] is paused
+                    assert first_state["revision"] == [1, 2, 3][["play", "pause", "seek"].index(action)]
+
+
+def test_late_join_receives_current_playback_state() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        with client.websocket_connect(host_url) as host:
+            host.receive_json()
+            host.receive_json()
+            host.receive_json()
+            host.receive_json()
+            host.send_json({"type": "playback_command", "action": "play", "position": 31.0})
+            current_state = host.receive_json()
+            assert current_state["paused"] is False
+
+            with client.websocket_connect(f"/ws/rooms/{room['code']}?participant_id=late-user&name=Late") as late_user:
+                late_user.receive_json()  # room_state
+                late_user.receive_json()  # participant_joined
+                late_user.receive_json()  # updated room_state
+                restored = late_user.receive_json()
+                assert restored["type"] == "playback_state"
+                assert restored["revision"] == current_state["revision"]
+                assert restored["paused"] is False
+                assert restored["position"] >= 31.0
+
+
+def test_reconnect_restores_playback_without_duplicating_participant() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        with client.websocket_connect(url) as first:
+            first.receive_json()
+            first.receive_json()
+            first.receive_json()
+            first.receive_json()
+            first.send_json({"type": "playback_command", "action": "play", "position": 14.0})
+            playback_state = first.receive_json()
+
+        with client.websocket_connect(url) as reconnected:
+            reconnected.receive_json()  # room_state
+            reconnected.receive_json()  # participant_joined
+            restored_room = reconnected.receive_json()
+            restored_playback = reconnected.receive_json()
+            assert len(restored_room["participants"]) == 1
+            assert restored_room["participants"][0]["id"] == room["participant_id"]
+            assert restored_playback["revision"] == playback_state["revision"]
+            assert restored_playback["paused"] is False
+            assert restored_playback["position"] >= 14.0
+
+
+def test_replacement_socket_does_not_duplicate_participant_or_drop_presence() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        with client.websocket_connect(url) as original:
+            original.receive_json()  # room_state
+            original.receive_json()  # participant_joined
+            original.receive_json()  # room_state
+            original.receive_json()  # playback_state
+
+            with client.websocket_connect(url) as replacement:
+                current_room = replacement.receive_json()
+                current_playback = replacement.receive_json()
+                assert current_room["type"] == "room_state"
+                assert len(current_room["participants"]) == 1
+                assert current_room["participants"][0]["connected"] is True
+                assert current_playback["type"] == "playback_state"
+                replacement.send_json({"type": "ping"})
+                assert replacement.receive_json() == {"type": "pong"}
+
+
+def test_sequential_overlapping_commands_get_distinct_ordered_revisions() -> None:
+    room, _ = RoomStore().create_room("Host")
+
+    first = room.set_playback("play", position=6.0, now=100.0)
+    second = room.set_playback("seek", position=9.0, now=100.1)
+
+    assert first["revision"] == 1
+    assert second["revision"] == 2
+    assert second["action"] == "seek"
+    assert second["position"] == 9.0
+    assert second["paused"] is False
+
+
+def test_concurrent_websocket_commands_get_distinct_room_revisions() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        guest = client.post(f"/api/rooms/{room['code']}/participants", json={"name": "Guest"}).json()
+        guest_url = f"/ws/rooms/{room['code']}?participant_id={guest['participant_id']}"
+        with client.websocket_connect(host_url) as host, client.websocket_connect(guest_url) as guest_socket:
+            host.receive_json()  # room_state
+            host.receive_json()  # participant_joined
+            host.receive_json()  # room_state
+            host.receive_json()  # playback_state
+            guest_socket.receive_json()  # room_state
+            host.receive_json()  # guest joined
+            host.receive_json()  # updated room_state
+            guest_socket.receive_json()  # participant_joined
+            guest_socket.receive_json()  # room_state
+            guest_socket.receive_json()  # playback_state
+
+            commands = (
+                {"type": "playback_command", "action": "play", "position": 3.0},
+                {"type": "playback_command", "action": "pause", "position": 8.0},
+            )
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_send = pool.submit(host.send_json, commands[0])
+                second_send = pool.submit(guest_socket.send_json, commands[1])
+                first_send.result()
+                second_send.result()
+
+            host_states = [host.receive_json(), host.receive_json()]
+            guest_states = [guest_socket.receive_json(), guest_socket.receive_json()]
+            assert sorted(state["revision"] for state in host_states) == [1, 2]
+            assert sorted(state["revision"] for state in guest_states) == [1, 2]
+            for state in host_states + guest_states:
+                assert (state["paused"] is True) == (state["action"] == "pause")
 
 
 def test_malformed_playback_commands_are_rejected_and_connection_survives() -> None:

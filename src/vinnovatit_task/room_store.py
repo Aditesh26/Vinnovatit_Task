@@ -11,6 +11,26 @@ from uuid import uuid4
 ROOM_CODE_ALPHABET = ascii_uppercase + digits
 
 
+def estimate_playback_position(
+    position: float, paused: bool, updated_at: float, now: float
+) -> float:
+    """Estimate the authoritative playhead at a given wall-clock time."""
+    if paused:
+        return position
+    return position + max(0.0, now - updated_at)
+
+
+def calculate_playback_drift(
+    local_position: float,
+    position: float,
+    paused: bool,
+    updated_at: float,
+    now: float,
+) -> float:
+    """Return signed local-minus-authoritative drift in seconds."""
+    return local_position - estimate_playback_position(position, paused, updated_at, now)
+
+
 @dataclass
 class Participant:
     id: str
@@ -29,6 +49,8 @@ class Room:
     playback_position: float = 0.0
     playback_paused: bool = True
     playback_updated_at: float = field(default_factory=time)
+    playback_revision: int = 0
+    playback_action: str = "pause"
 
     def snapshot(self) -> dict[str, object]:
         return {"code": self.code, "host_id": self.host_id, "participants": [p.as_dict() for p in self.participants.values()]}
@@ -36,14 +58,18 @@ class Room:
     def playback_snapshot(self, now: float | None = None) -> dict[str, object]:
         """Return playback state with an estimated position at the snapshot time."""
         snapshot_time = time() if now is None else now
-        position = self.playback_position
-        if not self.playback_paused:
-            position += max(0.0, snapshot_time - self.playback_updated_at)
         return {
             "type": "playback_state",
-            "position": position,
+            "position": estimate_playback_position(
+                self.playback_position,
+                self.playback_paused,
+                self.playback_updated_at,
+                snapshot_time,
+            ),
             "paused": self.playback_paused,
             "updated_at": snapshot_time,
+            "revision": self.playback_revision,
+            "action": self.playback_action,
         }
 
     def set_playback(self, action: str, position: float, now: float | None = None) -> dict[str, object]:
@@ -55,6 +81,8 @@ class Room:
         elif action == "pause":
             self.playback_paused = True
         self.playback_updated_at = updated_at
+        self.playback_revision += 1
+        self.playback_action = action
         return self.playback_snapshot(updated_at)
 
 

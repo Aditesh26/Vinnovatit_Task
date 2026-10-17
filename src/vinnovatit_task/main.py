@@ -23,6 +23,9 @@ from .connections import ConnectionManager
 from .room_store import RoomNotFoundError, RoomStore
 
 PACKAGE_DIR = Path(__file__).parent
+DRIFT_CORRECTION_THRESHOLD_SECONDS = 0.75
+DRIFT_CHECK_INTERVAL_MS = 1_000
+DRIFT_CORRECTION_COOLDOWN_MS = 2_500
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 store = RoomStore()
 connections = ConnectionManager()
@@ -78,7 +81,15 @@ async def room_page(request: Request, room_code: str) -> HTMLResponse:
     except RoomNotFoundError as error:
         raise HTTPException(status_code=404, detail="Room code not found.") from error
     return templates.TemplateResponse(
-        request, "room.html", {"room": room, "room_code": room.code}
+        request,
+        "room.html",
+        {
+            "room": room,
+            "room_code": room.code,
+            "drift_threshold_seconds": DRIFT_CORRECTION_THRESHOLD_SECONDS,
+            "drift_check_interval_ms": DRIFT_CHECK_INTERVAL_MS,
+            "drift_correction_cooldown_ms": DRIFT_CORRECTION_COOLDOWN_MS,
+        },
     )
 
 
@@ -157,6 +168,8 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
                 )
                 continue
 
+            # This mutation has no await, so one event-loop task assigns each
+            # room revision atomically. Clients discard delayed older revisions.
             playback_state = store.set_playback(room_code, action, float(position))
             await connections.broadcast(room_code, playback_state)
     except WebSocketDisconnect:
