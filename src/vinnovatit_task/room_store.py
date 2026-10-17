@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from hashlib import sha256
 from secrets import choice
+from secrets import compare_digest, token_urlsafe
 from string import ascii_uppercase, digits
 from threading import Lock
 from time import time
@@ -48,6 +50,7 @@ class Participant:
 class Room:
     code: str
     host_id: str
+    host_recovery_verifier: str | None = None
     participants: dict[str, Participant] = field(default_factory=dict)
     playback_position: float = 0.0
     playback_paused: bool = True
@@ -153,6 +156,10 @@ class HostAuthorizationError(PermissionError):
     """Raised when a participant tries an action reserved for the active host."""
 
 
+class HostRecoveryError(PermissionError):
+    """Raised when an existing host identity lacks a valid recovery credential."""
+
+
 class InvalidHostTransferError(ValueError):
     """Raised when a host transfer target is invalid."""
 
@@ -181,6 +188,16 @@ class RoomStore:
         self._rooms[code] = room
         return room, host
 
+    def issue_host_recovery_token(self, code: str, participant_id: str) -> str:
+        """Create a room-scoped recovery token and retain only its verifier."""
+        with self._participant_lock:
+            room = self.get_room(code)
+            if room.host_id != participant_id:
+                raise HostAuthorizationError("Only the room owner can receive its recovery token.")
+            token = token_urlsafe(32)
+            room.host_recovery_verifier = self._token_verifier(token)
+            return token
+
     def get_room(self, code: str) -> Room:
         room = self._rooms.get(code.upper())
         if room is None:
@@ -196,9 +213,16 @@ class RoomStore:
             room.participants[participant.id] = participant
             return participant
 
-    def connect_participant(self, code: str, participant_id: str, name: str) -> tuple[Room, Participant, bool]:
+    def connect_participant(
+        self, code: str, participant_id: str, name: str,
+        recovery_token: str | None = None,
+    ) -> tuple[Room, Participant, bool]:
         with self._participant_lock:
             room = self.get_room(code)
+            if room.host_id == participant_id and room.host_recovery_verifier is not None:
+                supplied_verifier = self._token_verifier(recovery_token or "")
+                if not compare_digest(room.host_recovery_verifier, supplied_verifier):
+                    raise HostRecoveryError("Host recovery could not be verified. Re-enter your name to join as a guest.")
             participant = room.participants.get(participant_id)
             if participant is None:
                 clean_name = self._clean_name(name, "Guest")
@@ -208,6 +232,10 @@ class RoomStore:
             was_connected = participant.connected
             participant.connected = True
             return room, participant, not was_connected
+
+    @staticmethod
+    def _token_verifier(token: str) -> str:
+        return sha256(token.encode("utf-8")).hexdigest()
 
     def disconnect_participant(self, code: str, participant_id: str) -> Room:
         with self._participant_lock:
@@ -233,9 +261,12 @@ class RoomStore:
 
             previous_host_id = room.host_id
             room.host_id = target_id
+            recovery_token = token_urlsafe(32)
+            room.host_recovery_verifier = self._token_verifier(recovery_token)
             return {
                 "type": "host_transferred",
                 "previous_host_id": previous_host_id,
+                "_private_host_recovery_token": recovery_token,
                 **room.snapshot(),
             }
 
@@ -335,13 +366,23 @@ class RoomStore:
                 raise RoomActionError("This poll is closed.")
             if not any(option["id"] == option_id for option in poll.options):
                 raise RoomActionError("Choose a valid option for this poll.")
-            if participant_id in poll.votes:
-                raise RoomActionError("You have already voted in this poll.")
-            poll.votes[participant_id] = option_id
-            poll.revision += 1
+            previous_option = poll.votes.get(participant_id)
+            if previous_option == option_id:
+                # A repeated selection is an idempotent no-op; do not inflate totals.
+                event = {"type": "poll_updated", "poll": poll.as_dict()}
+            else:
+                poll.votes[participant_id] = option_id
+                poll.revision += 1
+                event = {"type": "poll_updated", "poll": poll.as_dict()}
             # Vote identity and choice stay private; the handler sends a
             # separate acknowledgement only to this voter's WebSocket.
-            return {"type": "poll_updated", "poll": poll.as_dict()}
+            event["_private_ack"] = {
+                "type": "poll_vote_recorded",
+                "poll_id": poll_id,
+                "option_id": option_id,
+                "poll": poll.as_dict(participant_id),
+            }
+            return event
 
     def close_poll(self, code: str, participant_id: str, poll_id: str) -> dict[str, object]:
         with self._participant_lock:

@@ -1,12 +1,33 @@
 const roomCode = document.body.dataset.roomCode;
 const params = new URLSearchParams(window.location.search);
-const storedRoom = JSON.parse(sessionStorage.getItem(`watch-party:${roomCode}`) || "null");
-const participantId = params.get("participant_id") || storedRoom?.participant_id || crypto.randomUUID();
-const participantName = storedRoom?.participant_name || "Guest";
+const normalizedRoomCode = roomCode.trim().toUpperCase();
+const identityStorageKey = `watch-party:identity:${normalizedRoomCode}`;
+const recoveryStorageKey = `watch-party:host-recovery:${normalizedRoomCode}`;
+function readStoredIdentity() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(identityStorageKey) || "null");
+        if (saved && typeof saved.participant_id === "string" && saved.participant_id
+            && typeof saved.participant_name === "string" && saved.participant_name.trim()) return saved;
+    } catch { /* Ignore malformed or unavailable browser storage. */ }
+    return null;
+}
+function readHostRecoveryToken() {
+    try { return localStorage.getItem(recoveryStorageKey) || ""; }
+    catch { return ""; }
+}
+function saveStoredIdentity(id, name) {
+    try { localStorage.setItem(identityStorageKey, JSON.stringify({ participant_id: id, participant_name: name })); }
+    catch { /* The room still works for this page even if storage is unavailable. */ }
+}
+let storedRoom = readStoredIdentity();
+const participantId = storedRoom?.participant_id || params.get("participant_id") || crypto.randomUUID();
+const participantName = storedRoom?.participant_name || params.get("name") || "Guest";
+let hostRecoveryToken = readHostRecoveryToken() || params.get("recovery_token") || "";
 const status = document.querySelector("#connection-status");
 const list = document.querySelector("#participant-list");
 const count = document.querySelector("#participant-count");
 const message = document.querySelector("#room-message");
+const identityRecoveryLink = document.querySelector("#identity-recovery");
 const video = document.querySelector("#shared-video");
 video.controls = false;
 const playbackNotice = document.querySelector("#playback-notice");
@@ -266,13 +287,16 @@ function renderPolls() {
         const question = document.createElement("h3"); question.textContent = poll.question;
         const meta = document.createElement("p"); meta.className = "poll-meta";
         meta.textContent = `${poll.creator_name} · ${poll.total_votes} vote${poll.total_votes === 1 ? "" : "s"} · ${poll.status}`;
-        card.append(question, meta);
+        const voteHint = document.createElement("p");
+        voteHint.className = "poll-meta";
+        voteHint.textContent = poll.status === "open" ? "You can change your vote until this poll closes." : "Voting is closed.";
+        card.append(question, meta, voteHint);
         const myVote = myVotes.get(poll.id) || poll.my_vote || null;
         for (const option of poll.options) {
             const row = document.createElement("div"); row.className = "poll-choice";
             const voteButton = document.createElement("button"); voteButton.type = "button";
-            voteButton.textContent = myVote === option.id ? `Voted: ${option.text}` : option.text;
-            voteButton.disabled = poll.status !== "open" || Boolean(myVote);
+            voteButton.textContent = myVote === option.id ? `Your choice: ${option.text}` : option.text;
+            voteButton.disabled = poll.status !== "open";
             voteButton.addEventListener("click", () => sendSocialCommand({ type: "poll_vote", poll_id: poll.id, option_id: option.id }));
             const count = document.createElement("span"); count.textContent = `${option.votes} vote${option.votes === 1 ? "" : "s"}`;
             row.append(voteButton, count); card.append(row);
@@ -312,6 +336,12 @@ function applyPollEvent(data) {
 
 function applyPollVoteAcknowledgement(data) {
     if (typeof data.poll_id !== "string" || typeof data.option_id !== "string") return;
+    const currentPoll = pollStates.get(data.poll_id);
+    if (data.poll && typeof data.poll.id === "string") {
+        if (currentPoll && Number(data.poll.revision) < Number(currentPoll.revision)) return;
+        if (data.poll.my_vote !== data.option_id) return;
+        pollStates.set(data.poll.id, data.poll);
+    }
     myVotes.set(data.poll_id, data.option_id);
     renderPolls();
 }
@@ -346,8 +376,13 @@ function renderVideoCredit(movie) {
 function connect() {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     restoreOnNextPlaybackState = true;
-    socket = new WebSocket(`${protocol}://${window.location.host}/ws/rooms/${roomCode}?participant_id=${encodeURIComponent(participantId)}&name=${encodeURIComponent(participantName)}`);
+    const credentials = new URLSearchParams({ participant_id: participantId, name: participantName });
+    if (hostRecoveryToken) credentials.set("recovery_token", hostRecoveryToken);
+    socket = new WebSocket(`${protocol}://${window.location.host}/ws/rooms/${roomCode}?${credentials.toString()}`);
     socket.onopen = () => {
+        if (params.has("recovery_token") && window.history?.replaceState) {
+            window.history.replaceState(null, "", `/rooms/${normalizedRoomCode}`);
+        }
         status.textContent = "Connected";
         status.classList.add("online");
         if (!startSyncedPlaybackButton.hidden) showSyncedPlaybackButton();
@@ -357,12 +392,23 @@ function connect() {
         let data;
         try { data = JSON.parse(event.data); }
         catch { message.textContent = "Received an unreadable room update."; return; }
-        if (data.type === "room_state") acceptRoomState(data);
+        if (data.type === "room_state") {
+            saveStoredIdentity(participantId, participantName);
+            acceptRoomState(data);
+        }
         if (data.type === "host_transferred") {
+            if (data.host_id !== participantId) {
+                hostRecoveryToken = "";
+                try { localStorage.removeItem(recoveryStorageKey); } catch { /* Storage can be disabled. */ }
+            }
             renderParticipants(data.participants, data.host_id);
             renderPlaylist(data.playlist || []);
             renderPolls();
             message.textContent = data.host_id === participantId ? "You are now the host." : "The host role was transferred.";
+        }
+        if (data.type === "host_recovery_credential" && typeof data.token === "string") {
+            hostRecoveryToken = data.token;
+            try { localStorage.setItem(recoveryStorageKey, hostRecoveryToken); } catch { /* Host can use this connection; refresh recovery may be unavailable. */ }
         }
         if (data.type === "playback_state") receivePlaybackState(data);
         if (data.type === "participant_joined") message.textContent = `${data.participant.name} joined the room.`;
@@ -374,9 +420,27 @@ function connect() {
         if (data.type === "poll_vote_recorded") applyPollVoteAcknowledgement(data);
         if (data.type === "error") socialStatus.textContent = data.detail;
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
         status.textContent = "Reconnecting...";
         status.classList.remove("online");
+        if ([4403, 4409, 4404].includes(event.code)) {
+            status.textContent = "Room identity needs attention";
+            if (event.code === 4404) {
+                message.textContent = "This room is no longer available. Return home to create or join another room.";
+                identityRecoveryLink.href = "/";
+                identityRecoveryLink.textContent = "Return home";
+            } else {
+                message.textContent = event.reason || "Your saved room identity could not be verified. Re-enter your name to join as a guest.";
+                identityRecoveryLink.href = `/?room_code=${encodeURIComponent(normalizedRoomCode)}`;
+                identityRecoveryLink.textContent = "Re-enter your name";
+            }
+            identityRecoveryLink.hidden = false;
+            try {
+                localStorage.removeItem(identityStorageKey);
+                localStorage.removeItem(recoveryStorageKey);
+            } catch { /* Leave the recovery page available even if cleanup fails. */ }
+            return;
+        }
         if (!startSyncedPlaybackButton.hidden) showSyncedPlaybackButton();
         playbackNotice.textContent = "Room connection lost. Playback will resync when reconnected.";
         reconnectTimer = window.setTimeout(connect, 1500);

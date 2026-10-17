@@ -40,6 +40,14 @@ def connect_guest(client: TestClient, room: dict[str, str], participant_name: st
     return guest, f"/ws/rooms/{room['code']}?participant_id={guest['participant_id']}&name={participant_name}"
 
 
+def host_ws_url(room: dict[str, str], name: str | None = None) -> str:
+    suffix = f"&name={name}" if name else ""
+    return (
+        f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        f"&recovery_token={room['host_recovery_token']}{suffix}"
+    )
+
+
 def test_create_room_returns_a_six_character_code_and_share_url() -> None:
     with TestClient(app) as client:
         room = create_room(client)
@@ -47,6 +55,7 @@ def test_create_room_returns_a_six_character_code_and_share_url() -> None:
     assert room["code"].isalnum()
     assert room["room_url"] == f"/rooms/{room['code']}"
     assert room["participant_name"] == "Aditi"
+    assert len(room["host_recovery_token"]) >= 40
 
 
 def test_landing_and_valid_room_pages_render() -> None:
@@ -160,7 +169,7 @@ def test_reconnecting_participant_keeps_existing_identity_and_name() -> None:
 def test_new_websocket_identity_with_duplicate_name_is_rejected() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        url = host_ws_url(room, "Host")
         with client.websocket_connect(url) as host_socket:
             consume_initial_room_messages(host_socket)
             with pytest.raises(WebSocketDisconnect) as error:
@@ -202,7 +211,7 @@ def test_websocket_notifies_participants_in_the_same_room() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
         guest = client.post(f"/api/rooms/{room['code']}/participants", json={"name": "Guest"}).json()
-        with client.websocket_connect(f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host") as host_socket:
+        with client.websocket_connect(host_ws_url(room, "Host")) as host_socket:
             initial_state = host_socket.receive_json()
             assert initial_state["type"] == "room_state"
             assert initial_state["participants"][0]["connected"] is True
@@ -290,7 +299,7 @@ def test_drift_calculation_uses_estimated_authoritative_position() -> None:
 def test_play_pause_and_seek_commands_broadcast_authoritative_state() -> None:
     with TestClient(app) as client:
         room = create_room(client)
-        url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        url = host_ws_url(room, "Host")
         with client.websocket_connect(url) as first:
             assert first.receive_json()["type"] == "room_state"
             first.receive_json()  # participant_joined
@@ -323,7 +332,7 @@ def test_play_pause_and_seek_commands_broadcast_authoritative_state() -> None:
 def test_late_join_receives_current_playback_state() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        host_url = host_ws_url(room, "Host")
         with client.websocket_connect(host_url) as host:
             host.receive_json()
             host.receive_json()
@@ -347,7 +356,7 @@ def test_late_join_receives_current_playback_state() -> None:
 def test_reconnect_restores_playback_without_duplicating_participant() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        url = host_ws_url(room, "Host")
         with client.websocket_connect(url) as first:
             first.receive_json()
             first.receive_json()
@@ -371,7 +380,7 @@ def test_reconnect_restores_playback_without_duplicating_participant() -> None:
 def test_replacement_socket_does_not_duplicate_participant_or_drop_presence() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        url = host_ws_url(room)
         with client.websocket_connect(url) as original:
             original.receive_json()  # room_state
             original.receive_json()  # participant_joined
@@ -405,7 +414,7 @@ def test_sequential_overlapping_commands_get_distinct_ordered_revisions() -> Non
 def test_guest_websocket_commands_cannot_change_host_playback() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        host_url = host_ws_url(room)
         guest = client.post(f"/api/rooms/{room['code']}/participants", json={"name": "Guest"}).json()
         guest_url = f"/ws/rooms/{room['code']}?participant_id={guest['participant_id']}"
         with client.websocket_connect(host_url) as host, client.websocket_connect(guest_url) as guest_socket:
@@ -437,7 +446,7 @@ def test_guest_websocket_commands_cannot_change_host_playback() -> None:
 def test_host_transfer_broadcasts_new_host_and_moves_playback_permissions() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        host_url = host_ws_url(room, "Host")
         with client.websocket_connect(host_url) as host_socket:
             consume_initial_room_messages(host_socket)
             guest, guest_url = connect_guest(client, room, "Guest")
@@ -463,9 +472,13 @@ def test_host_transfer_broadcasts_new_host_and_moves_playback_permissions() -> N
                 assert host_update["type"] == "host_transferred"
                 assert host_update["previous_host_id"] == room["participant_id"]
                 assert host_update["host_id"] == guest["participant_id"]
+                assert "_private_host_recovery_token" not in host_update
                 assert all(p["connected"] for p in host_update["participants"])
                 assert store.get_room(room["code"]).playback_position == 25.0
                 assert store.get_room(room["code"]).playback_revision == prior_revision
+                new_host_credential = guest_socket.receive_json()
+                assert new_host_credential["type"] == "host_recovery_credential"
+                assert new_host_credential["token"]
 
                 for action, position in (("play", 30.0), ("pause", 35.0), ("seek", 40.0)):
                     host_socket.send_json({
@@ -490,7 +503,7 @@ def test_host_transfer_broadcasts_new_host_and_moves_playback_permissions() -> N
 def test_guest_cannot_transfer_host_privileges() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        host_url = host_ws_url(room)
         with client.websocket_connect(host_url) as host_socket:
             consume_initial_room_messages(host_socket)
             guest, guest_url = connect_guest(client, room, "Guest")
@@ -514,7 +527,7 @@ def test_malformed_and_cross_room_host_transfer_targets_are_rejected() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
         other_room = create_room(client, "Other host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        host_url = host_ws_url(room)
         with client.websocket_connect(host_url) as host_socket:
             consume_initial_room_messages(host_socket)
             for request in (
@@ -590,6 +603,61 @@ def test_host_disconnect_is_hostless_until_same_identity_reconnects() -> None:
     assert len(room.participants) == 2
 
 
+def test_host_recovery_requires_room_scoped_secret_not_participant_id() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        with pytest.raises(WebSocketDisconnect) as no_token:
+            with client.websocket_connect(
+                f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+            ):
+                pass
+        assert no_token.value.code == 4403
+
+        other_room = create_room(client, "Other")
+        with pytest.raises(WebSocketDisconnect) as wrong_room_token:
+            with client.websocket_connect(
+                f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+                f"&recovery_token={other_room['host_recovery_token']}"
+            ):
+                pass
+        assert wrong_room_token.value.code == 4403
+
+
+def test_old_host_reconnects_as_guest_after_host_transfer() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        host_url = host_ws_url(room, "Host")
+        guest, guest_url = connect_guest(client, room, "Guest")
+        recovery_credential = None
+        with client.websocket_connect(host_url) as former_host:
+            consume_initial_room_messages(former_host)
+            with client.websocket_connect(guest_url) as new_host:
+                former_host.receive_json()
+                former_host.receive_json()
+                for _ in range(4):
+                    new_host.receive_json()
+                former_host.send_json({"type": "host_transfer", "target_participant_id": guest["participant_id"]})
+                former_host.receive_json()
+                assert new_host.receive_json()["type"] == "host_transferred"
+                credential = new_host.receive_json()
+                assert credential["type"] == "host_recovery_credential"
+                recovery_credential = credential["token"]
+                new_host.close()
+
+        assert recovery_credential
+        with client.websocket_connect(f"{guest_url}&recovery_token={recovery_credential}") as recovered_new_host:
+            assert recovered_new_host.receive_json()["host_id"] == guest["participant_id"]
+            with client.websocket_connect(host_url) as former_reconnected:
+                state = former_reconnected.receive_json()
+                assert state["host_id"] == guest["participant_id"]
+                former_reconnected.receive_json()  # participant_joined
+                former_reconnected.receive_json()  # updated room_state
+                former_reconnected.receive_json()  # playback_state
+                former_reconnected.send_json({"type": "playback_command", "action": "play", "position": 1})
+                assert former_reconnected.receive_json()["type"] == "error"
+                assert store.get_room(room["code"]).active_host_id == guest["participant_id"]
+
+
 def test_malformed_playback_commands_are_rejected_and_connection_survives() -> None:
     with TestClient(app) as client:
         room = create_room(client)
@@ -615,8 +683,8 @@ def test_playback_broadcast_is_isolated_to_its_room() -> None:
     with TestClient(app) as client:
         room_one = create_room(client, "One")
         room_two = create_room(client, "Two")
-        url_one = f"/ws/rooms/{room_one['code']}?participant_id={room_one['participant_id']}"
-        url_two = f"/ws/rooms/{room_two['code']}?participant_id={room_two['participant_id']}"
+        url_one = host_ws_url(room_one)
+        url_two = host_ws_url(room_two)
         with client.websocket_connect(url_one) as first, client.websocket_connect(url_two) as second:
             for socket in (first, second):
                 socket.receive_json()  # room_state
@@ -634,7 +702,7 @@ def test_chat_message_is_trimmed_timestamped_and_broadcast_to_room() -> None:
 
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        host_url = host_ws_url(room, "Host")
         with client.websocket_connect(host_url) as host:
             consume_initial_room_messages(host)
             guest, guest_url = connect_guest(client, room)
@@ -678,7 +746,7 @@ def test_invalid_chat_payloads_return_error_and_keep_socket_open(payload) -> Non
 def test_reaction_broadcasts_only_supported_reaction_to_room() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        host_url = host_ws_url(room, "Host")
         with client.websocket_connect(host_url) as host:
             consume_initial_room_messages(host)
             _, guest_url = connect_guest(client, room)
@@ -717,8 +785,8 @@ def test_chat_and_reactions_are_isolated_between_rooms() -> None:
     with TestClient(app) as client:
         first = create_room(client, "First")
         second = create_room(client, "Second")
-        first_url = f"/ws/rooms/{first['code']}?participant_id={first['participant_id']}"
-        second_url = f"/ws/rooms/{second['code']}?participant_id={second['participant_id']}"
+        first_url = host_ws_url(first)
+        second_url = host_ws_url(second)
         with client.websocket_connect(first_url) as first_socket, client.websocket_connect(second_url) as second_socket:
             consume_initial_room_messages(first_socket)
             consume_initial_room_messages(second_socket)
@@ -854,8 +922,13 @@ def test_poll_validation_votes_and_close_permissions() -> None:
     assert voted["poll"]["options"][0]["votes"] == 1
     assert room.snapshot(voter.id)["polls"][0]["my_vote"] == first_option["id"]
     assert room.snapshot(other.id)["polls"][0]["my_vote"] is None
-    with pytest.raises(RoomActionError, match="already voted"):
-        room_store.vote_poll(room.code, voter.id, poll["id"], second_option["id"])
+    changed = room_store.vote_poll(room.code, voter.id, poll["id"], second_option["id"])
+    assert changed["poll"]["options"][0]["votes"] == 0
+    assert changed["poll"]["options"][1]["votes"] == 1
+    assert room.snapshot(voter.id)["polls"][0]["my_vote"] == second_option["id"]
+    repeated = room_store.vote_poll(room.code, voter.id, poll["id"], second_option["id"])
+    assert repeated["poll"]["options"][0]["votes"] == 0
+    assert repeated["poll"]["options"][1]["votes"] == 1
     with pytest.raises(RoomPermissionError, match="creator or current host"):
         room_store.close_poll(room.code, other.id, poll["id"])
     closed = room_store.close_poll(room.code, creator.id, poll["id"])
@@ -870,7 +943,7 @@ def test_poll_validation_votes_and_close_permissions() -> None:
     assert room_store.close_poll(room.code, host.id, host_poll["id"])["poll"]["status"] == "closed"
 
 
-def test_concurrent_votes_allow_only_one_vote_per_participant() -> None:
+def test_concurrent_vote_changes_keep_one_active_vote_and_consistent_totals() -> None:
     from threading import Barrier
 
     room_store = RoomStore()
@@ -892,7 +965,7 @@ def test_concurrent_votes_allow_only_one_vote_per_participant() -> None:
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(vote, choices))
-    assert sorted(results) == ["rejected", "voted"]
+    assert results == ["voted", "voted"]
     current = room.polls[poll["id"]]
     assert len(current.votes) == 1
     assert sum(option["votes"] for option in current.as_dict()["options"]) == 1
@@ -902,8 +975,8 @@ def test_playlist_and_poll_broadcasts_are_isolated_and_restored_on_late_join() -
     with TestClient(app) as client:
         room = create_room(client, "Host")
         other_room = create_room(client, "Other host")
-        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
-        other_url = f"/ws/rooms/{other_room['code']}?participant_id={other_room['participant_id']}&name=Other"
+        host_url = host_ws_url(room, "Host")
+        other_url = host_ws_url(other_room, "Other")
         with client.websocket_connect(host_url) as host_socket, client.websocket_connect(other_url) as other_socket:
             consume_initial_room_messages(host_socket)
             consume_initial_room_messages(other_socket)
@@ -918,6 +991,7 @@ def test_playlist_and_poll_broadcasts_are_isolated_and_restored_on_late_join() -
             updated = host_socket.receive_json()
             assert updated["type"] == "poll_updated"
             assert updated["poll"]["total_votes"] == 1
+            assert "my_vote" not in updated["poll"]
             assert host_socket.receive_json()["type"] == "poll_vote_recorded"
 
             guest, guest_url = connect_guest(client, room, "Late guest")
@@ -940,6 +1014,7 @@ def test_playlist_and_poll_broadcasts_are_isolated_and_restored_on_late_join() -
                 vote_ack = guest_socket.receive_json()
                 assert vote_ack["type"] == "poll_vote_recorded"
                 assert vote_ack["option_id"] == poll["options"][1]["id"]
+                assert vote_ack["poll"]["my_vote"] == poll["options"][1]["id"]
 
                 host_socket.send_json({"type": "poll_close", "poll_id": poll["id"]})
                 host_closed = host_socket.receive_json()
@@ -968,7 +1043,7 @@ def test_playlist_and_poll_broadcasts_are_isolated_and_restored_on_late_join() -
 def test_invalid_playlist_and_poll_messages_return_errors(payload) -> None:
     with TestClient(app) as client:
         room = create_room(client)
-        with client.websocket_connect(f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}") as socket:
+        with client.websocket_connect(host_ws_url(room)) as socket:
             consume_initial_room_messages(socket)
             socket.send_json(payload)
             assert socket.receive_json()["type"] == "error"

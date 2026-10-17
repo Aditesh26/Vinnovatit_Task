@@ -128,12 +128,13 @@ class FakeWebSocket extends FakeElement {
   }
 }
 
-function createGuestPage() {
+function createGuestPage(roomCode = "ABC123", storage = new Map()) {
   const selectors = new Map([
     ["#connection-status", new FakeElement()],
     ["#participant-list", new FakeElement()],
     ["#participant-count", new FakeElement()],
     ["#room-message", new FakeElement()],
+    ["#identity-recovery", new FakeElement()],
     ["#shared-video", new FakeVideo()],
     ["#video-credit", new FakeElement()],
     ["#playback-notice", new FakeElement()],
@@ -169,7 +170,7 @@ function createGuestPage() {
   const document = {
     body: {
       dataset: {
-        roomCode: "ABC123",
+        roomCode,
         driftThresholdSeconds: "0.75",
         driftCheckIntervalMs: "1000",
         driftCorrectionCooldownMs: "2500",
@@ -181,7 +182,7 @@ function createGuestPage() {
     createTextNode: (text) => { const node = new FakeElement(); node.textContent = text; return node; },
   };
   const window = {
-    location: { protocol: "http:", host: "localhost:8000", href: "http://localhost:8000/rooms/ABC123" },
+    location: { protocol: "http:", host: "localhost:8000", href: `http://localhost:8000/rooms/${roomCode}`, search: "" },
     addEventListener() {},
     setInterval() { return 1; },
     setTimeout,
@@ -193,7 +194,11 @@ function createGuestPage() {
     WebSocket: FakeWebSocket,
     HTMLMediaElement: { HAVE_METADATA: 1, HAVE_FUTURE_DATA: 3 },
     URLSearchParams,
-    sessionStorage: { getItem: () => null, setItem() {} },
+    localStorage: {
+      getItem: (key) => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
     crypto: { randomUUID: () => "guest-id" },
     performance: { now: () => 5000 },
     Promise,
@@ -223,6 +228,9 @@ function createGuestPage() {
     options: selectors.get("#poll-options-inputs"),
     addOption: selectors.get("#add-poll-option"),
     pollStatus: selectors.get("#poll-status"),
+    pollList: selectors.get("#poll-list"),
+    storage,
+    identityRecovery: selectors.get("#identity-recovery"),
   };
 }
 
@@ -307,6 +315,87 @@ test("poll option controls enforce limits, renumber rows, and preserve other inp
   assert.equal(addOption.disabled, false);
   rows()[0].querySelector(".remove-poll-option").emit("click");
   assert.equal(rows().length, 2, "the minimum option count cannot be crossed");
+});
+
+test("room identity is saved per normalized room code and reused on refresh", () => {
+  const storage = new Map();
+  const first = createGuestPage("abc123", storage);
+  first.socket.onmessage({ data: JSON.stringify({
+    type: "room_state", host_id: "host-id", participants: [], playlist: [], polls: [],
+  }) });
+  const saved = JSON.parse(storage.get("watch-party:identity:ABC123"));
+  assert.equal(saved.participant_id, "guest-id");
+  assert.equal(saved.participant_name, "Guest");
+
+  const refreshed = createGuestPage("ABC123", storage);
+  assert.match(refreshed.socket.url, /participant_id=guest-id/);
+  assert.match(refreshed.socket.url, /name=Guest/);
+
+  storage.set("watch-party:identity:ROOM99", JSON.stringify({ participant_id: "second-room-id", participant_name: "Other" }));
+  const otherRoom = createGuestPage("ROOM99", storage);
+  assert.match(otherRoom.socket.url, /participant_id=second-room-id/);
+  assert.match(otherRoom.socket.url, /name=Other/);
+  assert.equal(JSON.parse(storage.get("watch-party:identity:ABC123")).participant_id, "guest-id");
+});
+
+test("malformed room identity storage falls back to a fresh session without throwing", () => {
+  const storage = new Map([["watch-party:identity:ABC123", "not-json"]]);
+  const page = createGuestPage("ABC123", storage);
+  assert.match(page.socket.url, /participant_id=guest-id/);
+  page.socket.onmessage({ data: JSON.stringify({ type: "room_state", host_id: null, participants: [], polls: [] }) });
+  assert.equal(JSON.parse(storage.get("watch-party:identity:ABC123")).participant_id, "guest-id");
+});
+
+test("rejected stale identity clears saved data and exposes the re-entry link", () => {
+  const storage = new Map([["watch-party:identity:ABC123", JSON.stringify({ participant_id: "old-id", participant_name: "Old" })]]);
+  const page = createGuestPage("ABC123", storage);
+  page.socket.onclose({ code: 4409, reason: "Name unavailable" });
+  assert.equal(storage.has("watch-party:identity:ABC123"), false);
+  assert.equal(page.identityRecovery.hidden, false);
+  assert.equal(page.identityRecovery.href, "/?room_code=ABC123");
+});
+
+test("host recovery credentials use a separate room-local key", () => {
+  const storage = new Map();
+  const page = createGuestPage("ABC123", storage);
+  page.socket.onmessage({ data: JSON.stringify({ type: "room_state", host_id: "host-id", participants: [], polls: [] }) });
+  page.socket.onmessage({ data: JSON.stringify({ type: "host_recovery_credential", token: "secure-token" }) });
+  assert.equal(storage.get("watch-party:host-recovery:ABC123"), "secure-token");
+  assert.equal(JSON.parse(storage.get("watch-party:identity:ABC123")).host_recovery_token, undefined);
+  page.socket.onmessage({ data: JSON.stringify({
+    type: "host_transferred", host_id: "new-host", participants: [], playlist: [],
+  }) });
+  assert.equal(storage.has("watch-party:host-recovery:ABC123"), false);
+});
+
+test("poll UI keeps the selected option private and permits changing an open vote", () => {
+  const { socket, pollList } = createGuestPage();
+  const poll = {
+    id: "poll-1", question: "Pick a film", creator_id: "host-id", creator_name: "Host",
+    status: "open", total_votes: 0, revision: 1,
+    options: [{ id: "a", text: "A", votes: 0 }, { id: "b", text: "B", votes: 0 }],
+  };
+  socket.onmessage({ data: JSON.stringify({ type: "room_state", host_id: "host-id", participants: [], polls: [poll] }) });
+  let buttons = pollList.querySelectorAll(".poll-choice").map((row) => row.children[0]);
+  assert.equal(buttons[0].disabled, false);
+  buttons[0].emit("click");
+  assert.deepEqual(socket.sent.at(-1), { type: "poll_vote", poll_id: "poll-1", option_id: "a" });
+  const selectedA = { ...poll, revision: 2, total_votes: 1, my_vote: "a", options: [
+    { id: "a", text: "A", votes: 1 }, { id: "b", text: "B", votes: 0 },
+  ] };
+  socket.onmessage({ data: JSON.stringify({ type: "poll_vote_recorded", poll_id: "poll-1", option_id: "a", poll: selectedA }) });
+  buttons = pollList.querySelectorAll(".poll-choice").map((row) => row.children[0]);
+  assert.match(buttons[0].textContent, /Your choice: A/);
+  assert.equal(buttons[1].disabled, false, "a different option remains selectable");
+  buttons[1].emit("click");
+  assert.deepEqual(socket.sent.at(-1), { type: "poll_vote", poll_id: "poll-1", option_id: "b" });
+  const selectedB = { ...poll, revision: 3, total_votes: 1, my_vote: "b", options: [
+    { id: "a", text: "A", votes: 0 }, { id: "b", text: "B", votes: 1 },
+  ] };
+  socket.onmessage({ data: JSON.stringify({ type: "poll_vote_recorded", poll_id: "poll-1", option_id: "b", poll: selectedB }) });
+  socket.onmessage({ data: JSON.stringify({ type: "poll_vote_recorded", poll_id: "poll-1", option_id: "a", poll: selectedA }) });
+  buttons = pollList.querySelectorAll(".poll-choice").map((row) => row.children[0]);
+  assert.match(buttons[1].textContent, /Your choice: B/, "a delayed old acknowledgement cannot restore the previous selection");
 });
 
 test("host-selected catalogue media changes the local source and reports source errors", () => {

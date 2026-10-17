@@ -25,6 +25,7 @@ from .movies import MOVIES, search_movies
 from .room_store import (
     DuplicateParticipantNameError,
     HostAuthorizationError,
+    HostRecoveryError,
     InvalidHostTransferError,
     RoomActionError,
     RoomPermissionError,
@@ -82,7 +83,8 @@ async def movie_catalog(search: str = "", category: str = "") -> dict[str, objec
 @app.post("/api/rooms", status_code=status.HTTP_201_CREATED)
 async def create_room(data: RoomCreate) -> dict[str, str]:
     room, host = store.create_room(data.name)
-    return room_payload(room.code, host.id, host.name)
+    recovery_token = store.issue_host_recovery_token(room.code, host.id)
+    return {**room_payload(room.code, host.id, host.name), "host_recovery_token": recovery_token}
 
 
 @app.post("/api/rooms/{room_code}/participants", status_code=status.HTTP_201_CREATED)
@@ -127,14 +129,18 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
 
     participant_id = websocket.query_params.get("participant_id") or str(uuid4())
     participant_name = websocket.query_params.get("name", "Guest")
+    recovery_token = websocket.query_params.get("recovery_token")
     try:
         # Resolve identity/name before registering a socket, so a rejected
         # duplicate WebSocket cannot appear in the room's connection manager.
         room, participant, joined = store.connect_participant(
-            room_code, participant_id, participant_name
+            room_code, participant_id, participant_name, recovery_token
         )
     except DuplicateParticipantNameError as error:
         await websocket.close(code=4409, reason=str(error))
+        return
+    except HostRecoveryError as error:
+        await websocket.close(code=4403, reason=str(error))
         return
     await connections.connect(room_code, participant_id, websocket)
     await connections.send(websocket, {"type": "room_state", **room.snapshot(participant_id)})
@@ -239,9 +245,14 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
                         websocket, {"type": "error", "detail": str(error)}
                     )
                     continue
-                # The store changes the authoritative host before this room-only
-                # broadcast, so every client sees the new role immediately.
+                # Remove the rotated credential before broadcasting. Only the
+                # new host's active socket receives it.
+                recovery_token = transfer_state.pop("_private_host_recovery_token")
                 await connections.broadcast(room_code, transfer_state)
+                await connections.send_to_participant(room_code, target_id, {
+                    "type": "host_recovery_credential",
+                    "token": recovery_token,
+                })
                 continue
             message_type = message.get("type")
             if isinstance(message_type, str) and message_type in {"playlist_add", "playlist_remove", "playlist_select"}:
@@ -292,13 +303,10 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
                 except (RoomActionError, RoomPermissionError) as error:
                     await connections.send(websocket, {"type": "error", "detail": str(error)})
                     continue
+                vote_ack = event.pop("_private_ack", None) if kind == "poll_vote" else None
                 await connections.broadcast(room_code, event)
-                if kind == "poll_vote":
-                    await connections.send(websocket, {
-                        "type": "poll_vote_recorded",
-                        "poll_id": poll_id,
-                        "option_id": option_id,
-                    })
+                if vote_ack is not None:
+                    await connections.send(websocket, vote_ack)
                 continue
             if message.get("type") != "playback_command":
                 await connections.send(

@@ -41,6 +41,7 @@
           </div>
           <ul id="participant-list" aria-live="polite"></ul>
           <p id="room-message" class="room-message" aria-live="polite"></p>
+          <a id="identity-recovery" class="identity-recovery" href="/?room_code={{ room_code }}" hidden>Re-enter your name</a>
         </aside>
       </section>
       <section class="rooms-tools-grid" aria-label="Shared movie tools">
@@ -62,7 +63,7 @@
         </section>
       </section>
       <section class="social-panel polls-panel" aria-labelledby="polls-title">
-        <div class="social-heading"><div><p class="eyebrow">MAKE A GROUP DECISION</p><h2 id="polls-title">Room polls</h2></div><span class="chat-limit">One vote per person</span></div>
+        <div class="social-heading"><div><p class="eyebrow">MAKE A GROUP DECISION</p><h2 id="polls-title">Room polls</h2></div><span class="chat-limit">Change your vote until a poll closes</span></div>
         <form id="poll-form" class="poll-form">
           <label for="poll-question">Question</label>
           <input id="poll-question" maxlength="160" required placeholder="What should we watch next?" />

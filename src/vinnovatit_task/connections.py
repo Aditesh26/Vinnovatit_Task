@@ -39,6 +39,14 @@ class ConnectionManager:
         except (RuntimeError, OSError, WebSocketDisconnect):
             pass
 
+    async def send_to_participant(
+        self, room_code: str, participant_id: str, message: dict[str, object]
+    ) -> None:
+        """Deliver a private event without exposing it to the room broadcast."""
+        socket = self._connections.get(room_code, {}).get(participant_id)
+        if socket is not None:
+            await self.send(socket, message)
+
     async def broadcast(self, room_code: str, message: dict[str, object]) -> None:
         await asyncio.gather(
             *(
