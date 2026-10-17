@@ -20,7 +20,7 @@
           <p class="eyebrow">YOUR WATCH ROOM</p>
           <h1>Room <span>{{ room_code }}</span></h1>
         </div>
-        <button id="copy-link" class="secondary">Copy invite link</button>
+        <button id="copy-code" class="secondary">Copy invite code</button>
       </section>
       <section class="watch-layout">
         <div class="player-card">
@@ -29,6 +29,9 @@
             Your browser does not support HTML5 video.
           </video>
           <p id="playback-notice" class="playback-notice" role="status" aria-live="polite"></p>
+          <button id="start-synced-playback" class="start-synced-playback" type="button" hidden disabled>
+            Click to start synchronized playback
+          </button>
           <small class="video-credit">Sample: <a href="https://www.sintel.org/" target="_blank" rel="noreferrer">Sintel trailer</a>, Blender Foundation, <a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noreferrer">CC BY 3.0</a>.</small>
         </div>
         <aside class="participants-panel">
@@ -39,6 +42,31 @@
           <ul id="participant-list" aria-live="polite"></ul>
           <p id="room-message" class="room-message" aria-live="polite"></p>
         </aside>
+      </section>
+      <section class="social-panel" aria-label="Room chat and reactions">
+        <div class="social-heading">
+          <div>
+            <p class="eyebrow">WATCH TOGETHER</p>
+            <h2>Room chat</h2>
+          </div>
+          <span class="chat-limit">Up to 500 characters</span>
+        </div>
+        <div class="reaction-row" aria-label="Send a reaction">
+          <span>React:</span>
+          <button class="reaction-button" type="button" data-emoji="😂" aria-label="Laugh">😂</button>
+          <button class="reaction-button" type="button" data-emoji="❤️" aria-label="Love">❤️</button>
+          <button class="reaction-button" type="button" data-emoji="🔥" aria-label="Fire">🔥</button>
+          <button class="reaction-button" type="button" data-emoji="👏" aria-label="Applause">👏</button>
+          <button class="reaction-button" type="button" data-emoji="😮" aria-label="Surprised">😮</button>
+        </div>
+        <ol id="chat-messages" class="chat-messages" aria-live="polite" aria-label="Room messages"></ol>
+        <div id="reaction-feed" class="reaction-feed" aria-live="polite" aria-label="Recent reactions"></div>
+        <p id="social-status" class="social-status" role="status" aria-live="polite"></p>
+        <form id="chat-form" class="chat-form">
+          <label class="visually-hidden" for="chat-input">Write a message</label>
+          <input id="chat-input" name="text" maxlength="500" autocomplete="off" placeholder="Say something to the room..." />
+          <button type="submit">Send</button>
+        </form>
       </section>
       <section class="share-code">
         <p>Share this code</p>
