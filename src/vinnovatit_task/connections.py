@@ -4,6 +4,7 @@ import asyncio
 from collections import defaultdict
 
 from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 
 class ConnectionManager:
@@ -35,7 +36,7 @@ class ConnectionManager:
     async def send(self, websocket: WebSocket, message: dict[str, object]) -> None:
         try:
             await websocket.send_json(message)
-        except RuntimeError, asyncio.CancelledError:
+        except (RuntimeError, OSError, WebSocketDisconnect):
             pass
 
     async def broadcast(self, room_code: str, message: dict[str, object]) -> None:

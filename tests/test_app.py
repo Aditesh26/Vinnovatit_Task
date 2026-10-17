@@ -1,10 +1,15 @@
 import pytest
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from vinnovatit_task.main import app
+from vinnovatit_task.main import app, store
+from vinnovatit_task.connections import ConnectionManager
 from vinnovatit_task.room_store import (
+    DuplicateParticipantNameError,
+    HostAuthorizationError,
+    InvalidHostTransferError,
     RoomStore,
     calculate_playback_drift,
     estimate_playback_position,
@@ -15,6 +20,21 @@ def create_room(client: TestClient, name: str = "Aditi") -> dict[str, str]:
     response = client.post("/api/rooms", json={"name": name})
     assert response.status_code == 201
     return response.json()
+
+
+def consume_initial_room_messages(socket) -> None:
+    """Consume the initial room, presence, and playback messages for a new host."""
+    assert socket.receive_json()["type"] == "room_state"
+    assert socket.receive_json()["type"] == "participant_joined"
+    assert socket.receive_json()["type"] == "room_state"
+    assert socket.receive_json()["type"] == "playback_state"
+
+
+def connect_guest(client: TestClient, room: dict[str, str], participant_name: str = "Guest"):
+    guest = client.post(
+        f"/api/rooms/{room['code']}/participants", json={"name": participant_name}
+    ).json()
+    return guest, f"/ws/rooms/{room['code']}?participant_id={guest['participant_id']}&name={participant_name}"
 
 
 def test_create_room_returns_a_six_character_code_and_share_url() -> None:
@@ -33,6 +53,9 @@ def test_landing_and_valid_room_pages_render() -> None:
         room_page = client.get(room["room_url"])
     assert room_page.status_code == 200
     assert room["code"] in room_page.text
+    assert 'id="chat-form"' in room_page.text
+    assert 'data-emoji="😂"' in room_page.text
+    assert 'id="start-synced-playback"' in room_page.text
 
 
 def test_join_existing_room_and_reject_unknown_code() -> None:
@@ -45,6 +68,94 @@ def test_join_existing_room_and_reject_unknown_code() -> None:
     assert joined.json()["participant_name"] == "Rohan"
     assert missing.status_code == 404
     assert missing.json()["detail"] == "Room code not found."
+
+
+def test_display_names_are_unique_ignoring_case_within_a_room() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        first = client.post(
+            f"/api/rooms/{room['code']}/participants", json={"name": "Sad"}
+        )
+        duplicate = client.post(
+            f"/api/rooms/{room['code']}/participants", json={"name": "sAD"}
+        )
+
+    assert first.status_code == 201
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == (
+        "That display name is already in use in this room. Please choose another name."
+    )
+
+
+def test_same_display_name_is_allowed_in_separate_rooms() -> None:
+    with TestClient(app) as client:
+        first_room = create_room(client, "Host one")
+        second_room = create_room(client, "Host two")
+        first_join = client.post(
+            f"/api/rooms/{first_room['code']}/participants", json={"name": "Sad"}
+        )
+        second_join = client.post(
+            f"/api/rooms/{second_room['code']}/participants", json={"name": "sAD"}
+        )
+
+    assert first_join.status_code == 201
+    assert second_join.status_code == 201
+
+
+def test_reconnecting_participant_keeps_existing_identity_and_name() -> None:
+    store = RoomStore()
+    room, host = store.create_room("Host")
+    participant = store.add_participant(room.code, "Sad")
+    _, connected, first_join = store.connect_participant(
+        room.code, participant.id, "Sad"
+    )
+    store.disconnect_participant(room.code, participant.id)
+
+    _, reconnected, joined_again = store.connect_participant(
+        room.code, participant.id, "sAD"
+    )
+
+    assert first_join is True
+    assert joined_again is True
+    assert connected.id == reconnected.id == participant.id
+    assert reconnected.name == "Sad"
+    assert host.id != reconnected.id
+
+
+def test_new_websocket_identity_with_duplicate_name_is_rejected() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        with client.websocket_connect(url) as host_socket:
+            consume_initial_room_messages(host_socket)
+            with pytest.raises(WebSocketDisconnect) as error:
+                with client.websocket_connect(
+                    f"/ws/rooms/{room['code']}?participant_id=new-id&name=hOST"
+                ):
+                    pass
+    assert error.value.code == 4409
+
+
+def test_concurrent_join_attempts_cannot_claim_same_display_name() -> None:
+    from threading import Barrier
+
+    store = RoomStore()
+    room, _ = store.create_room("Host")
+    start_together = Barrier(2)
+
+    def attempt_join(name: str) -> str:
+        start_together.wait()
+        try:
+            store.add_participant(room.code, name)
+            return "joined"
+        except DuplicateParticipantNameError:
+            return "duplicate"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt_join, ("Sad", "sAD")))
+
+    assert sorted(results) == ["duplicate", "joined"]
+    assert sum(participant.name.casefold() == "sad" for participant in room.participants.values()) == 1
 
 
 def test_room_page_returns_404_for_an_invalid_room_code() -> None:
@@ -245,7 +356,7 @@ def test_sequential_overlapping_commands_get_distinct_ordered_revisions() -> Non
     assert second["paused"] is False
 
 
-def test_concurrent_websocket_commands_get_distinct_room_revisions() -> None:
+def test_guest_websocket_commands_cannot_change_host_playback() -> None:
     with TestClient(app) as client:
         room = create_room(client, "Host")
         host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
@@ -263,22 +374,174 @@ def test_concurrent_websocket_commands_get_distinct_room_revisions() -> None:
             guest_socket.receive_json()  # room_state
             guest_socket.receive_json()  # playback_state
 
-            commands = (
-                {"type": "playback_command", "action": "play", "position": 3.0},
-                {"type": "playback_command", "action": "pause", "position": 8.0},
-            )
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                first_send = pool.submit(host.send_json, commands[0])
-                second_send = pool.submit(guest_socket.send_json, commands[1])
-                first_send.result()
-                second_send.result()
+            host.send_json({"type": "playback_command", "action": "play", "position": 3.0})
+            host_state = host.receive_json()
+            guest_state = guest_socket.receive_json()
+            assert host_state == guest_state
+            assert host_state["revision"] == 1
+            assert host_state["paused"] is False
 
-            host_states = [host.receive_json(), host.receive_json()]
-            guest_states = [guest_socket.receive_json(), guest_socket.receive_json()]
-            assert sorted(state["revision"] for state in host_states) == [1, 2]
-            assert sorted(state["revision"] for state in guest_states) == [1, 2]
-            for state in host_states + guest_states:
-                assert (state["paused"] is True) == (state["action"] == "pause")
+            guest_socket.send_json({"type": "playback_command", "action": "pause", "position": 8.0})
+            assert guest_socket.receive_json()["type"] == "error"
+            room_state = store.get_room(room["code"])
+            assert room_state.playback_position == 3.0
+            assert room_state.playback_paused is False
+
+
+def test_host_transfer_broadcasts_new_host_and_moves_playback_permissions() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        with client.websocket_connect(host_url) as host_socket:
+            consume_initial_room_messages(host_socket)
+            guest, guest_url = connect_guest(client, room, "Guest")
+            with client.websocket_connect(guest_url) as guest_socket:
+                host_socket.receive_json()  # participant_joined
+                host_socket.receive_json()  # updated room_state
+                for _ in range(4):
+                    guest_socket.receive_json()  # initial room/presence/playback state
+
+                host_socket.send_json({"type": "playback_command", "action": "pause", "position": 25.0})
+                assert host_socket.receive_json()["type"] == "playback_state"
+                assert guest_socket.receive_json()["type"] == "playback_state"
+                before_transfer = store.get_room(room["code"])
+                prior_revision = before_transfer.playback_revision
+
+                host_socket.send_json({
+                    "type": "host_transfer",
+                    "target_participant_id": guest["participant_id"],
+                })
+                host_update = host_socket.receive_json()
+                guest_update = guest_socket.receive_json()
+                assert host_update == guest_update
+                assert host_update["type"] == "host_transferred"
+                assert host_update["previous_host_id"] == room["participant_id"]
+                assert host_update["host_id"] == guest["participant_id"]
+                assert all(p["connected"] for p in host_update["participants"])
+                assert store.get_room(room["code"]).playback_position == 25.0
+                assert store.get_room(room["code"]).playback_revision == prior_revision
+
+                for action, position in (("play", 30.0), ("pause", 35.0), ("seek", 40.0)):
+                    host_socket.send_json({
+                        "type": "playback_command",
+                        "action": action,
+                        "position": position,
+                    })
+                    assert host_socket.receive_json()["type"] == "error"
+
+                    guest_socket.send_json({
+                        "type": "playback_command",
+                        "action": action,
+                        "position": position,
+                    })
+                    assert host_socket.receive_json()["type"] == "playback_state"
+                    new_host_state = guest_socket.receive_json()
+                    assert new_host_state["type"] == "playback_state"
+                    assert new_host_state["action"] == action
+                    assert new_host_state["position"] == position
+
+
+def test_guest_cannot_transfer_host_privileges() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        with client.websocket_connect(host_url) as host_socket:
+            consume_initial_room_messages(host_socket)
+            guest, guest_url = connect_guest(client, room, "Guest")
+            with client.websocket_connect(guest_url) as guest_socket:
+                host_socket.receive_json()
+                host_socket.receive_json()
+                for _ in range(4):
+                    guest_socket.receive_json()
+
+                guest_socket.send_json({
+                    "type": "host_transfer",
+                    "target_participant_id": guest["participant_id"],
+                })
+                assert guest_socket.receive_json()["type"] == "error"
+                assert store.get_room(room["code"]).host_id == room["participant_id"]
+                host_socket.send_json({"type": "ping"})
+                assert host_socket.receive_json() == {"type": "pong"}
+
+
+def test_malformed_and_cross_room_host_transfer_targets_are_rejected() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        other_room = create_room(client, "Other host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}"
+        with client.websocket_connect(host_url) as host_socket:
+            consume_initial_room_messages(host_socket)
+            for request in (
+                {"type": "host_transfer", "target_participant_id": []},
+                {"type": "host_transfer", "target_participant_id": "missing", "extra": True},
+                {"type": "host_transfer", "target_participant_id": other_room["participant_id"]},
+            ):
+                host_socket.send_json(request)
+                assert host_socket.receive_json()["type"] == "error"
+            assert store.get_room(room["code"]).host_id == room["participant_id"]
+
+
+def test_host_transfer_rejects_self_unknown_and_disconnected_targets() -> None:
+    room_store = RoomStore()
+    room, host = room_store.create_room("Host")
+    room_store.connect_participant(room.code, host.id, host.name)
+    disconnected_target = room_store.add_participant(room.code, "Disconnected")
+
+    with pytest.raises(InvalidHostTransferError, match="already the host"):
+        room_store.transfer_host(room.code, host.id, host.id)
+    with pytest.raises(InvalidHostTransferError, match="currently connected"):
+        room_store.transfer_host(room.code, host.id, disconnected_target.id)
+    with pytest.raises(InvalidHostTransferError, match="currently connected"):
+        room_store.transfer_host(room.code, host.id, "not-a-room-participant")
+    assert room.host_id == host.id
+
+
+def test_concurrent_host_transfers_have_one_authorized_winner() -> None:
+    from threading import Barrier
+
+    room_store = RoomStore()
+    room, host = room_store.create_room("Host")
+    room_store.connect_participant(room.code, host.id, host.name)
+    first_target = room_store.add_participant(room.code, "First")
+    second_target = room_store.add_participant(room.code, "Second")
+    room_store.connect_participant(room.code, first_target.id, first_target.name)
+    room_store.connect_participant(room.code, second_target.id, second_target.name)
+    start_together = Barrier(2)
+
+    def transfer(target_id: str) -> str:
+        start_together.wait()
+        try:
+            room_store.transfer_host(room.code, host.id, target_id)
+            return target_id
+        except HostAuthorizationError:
+            return "no-longer-host"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(transfer, (first_target.id, second_target.id)))
+
+    assert results.count("no-longer-host") == 1
+    assert room.host_id in {first_target.id, second_target.id}
+
+
+def test_host_disconnect_is_hostless_until_same_identity_reconnects() -> None:
+    room_store = RoomStore()
+    room, host = room_store.create_room("Host")
+    room_store.connect_participant(room.code, host.id, host.name)
+    guest = room_store.add_participant(room.code, "Guest")
+    room_store.connect_participant(room.code, guest.id, guest.name)
+
+    room_store.disconnect_participant(room.code, host.id)
+    assert room.snapshot()["host_id"] is None
+    assert room.snapshot()["hostless"] is True
+    with pytest.raises(HostAuthorizationError):
+        room_store.set_playback_as_host(room.code, guest.id, "play", 10)
+
+    # A refresh and a permanent tab close look identical. Do not transfer the
+    # role automatically; the same stable participant ID restores it on reconnect.
+    _, reconnected, _ = room_store.connect_participant(room.code, host.id, "Host")
+    assert reconnected.id == host.id
+    assert room.snapshot()["host_id"] == host.id
+    assert len(room.participants) == 2
 
 
 def test_malformed_playback_commands_are_rejected_and_connection_survives() -> None:
@@ -318,3 +581,131 @@ def test_playback_broadcast_is_isolated_to_its_room() -> None:
             assert first.receive_json()["position"] == 21
             second.send_json({"type": "ping"})
             assert second.receive_json() == {"type": "pong"}
+
+
+def test_chat_message_is_trimmed_timestamped_and_broadcast_to_room() -> None:
+    from datetime import datetime
+
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        with client.websocket_connect(host_url) as host:
+            consume_initial_room_messages(host)
+            guest, guest_url = connect_guest(client, room)
+            with client.websocket_connect(guest_url) as guest_socket:
+                host.receive_json()  # participant_joined
+                host.receive_json()  # updated room_state
+                guest_socket.receive_json()  # initial room_state
+                guest_socket.receive_json()  # participant_joined
+                guest_socket.receive_json()  # updated room_state
+                guest_socket.receive_json()  # playback_state
+
+                host.send_json({"type": "chat_send", "text": "  Hello, room!  "})
+                for socket in (host, guest_socket):
+                    event = socket.receive_json()
+                    assert event["type"] == "chat_message"
+                    assert event["sender"] == "Host"
+                    assert event["sender_id"] == room["participant_id"]
+                    assert event["text"] == "Hello, room!"
+                    assert event["message_id"]
+                    datetime.fromisoformat(event["timestamp"])
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": "chat_send", "text": ""},
+    {"type": "chat_send", "text": "   \n  "},
+    {"type": "chat_send", "text": "x" * 501},
+    {"type": "chat_send", "text": 42},
+    {"type": "chat_send", "text": "hello", "extra": True},
+])
+def test_invalid_chat_payloads_return_error_and_keep_socket_open(payload) -> None:
+    with TestClient(app) as client:
+        room = create_room(client)
+        with client.websocket_connect(f"/ws/rooms/{room['code']}") as socket:
+            consume_initial_room_messages(socket)
+            socket.send_json(payload)
+            assert socket.receive_json()["type"] == "error"
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json() == {"type": "pong"}
+
+
+def test_reaction_broadcasts_only_supported_reaction_to_room() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        with client.websocket_connect(host_url) as host:
+            consume_initial_room_messages(host)
+            _, guest_url = connect_guest(client, room)
+            with client.websocket_connect(guest_url) as guest_socket:
+                host.receive_json()  # participant_joined
+                host.receive_json()  # updated room_state
+                for _ in range(4):
+                    guest_socket.receive_json()
+
+                host.send_json({"type": "reaction_send", "emoji": "❤️"})
+                for socket in (host, guest_socket):
+                    event = socket.receive_json()
+                    assert event["type"] == "reaction"
+                    assert event["sender"] == "Host"
+                    assert event["emoji"] == "❤️"
+                    assert event["reaction_id"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": "reaction_send", "emoji": "💩"},
+    {"type": "reaction_send", "emoji": ["😂"]},
+    {"type": "reaction_send", "emoji": "😂", "extra": 1},
+])
+def test_invalid_reactions_return_error_without_crashing(payload) -> None:
+    with TestClient(app) as client:
+        room = create_room(client)
+        with client.websocket_connect(f"/ws/rooms/{room['code']}") as socket:
+            consume_initial_room_messages(socket)
+            socket.send_json(payload)
+            assert socket.receive_json()["type"] == "error"
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json() == {"type": "pong"}
+
+
+def test_chat_and_reactions_are_isolated_between_rooms() -> None:
+    with TestClient(app) as client:
+        first = create_room(client, "First")
+        second = create_room(client, "Second")
+        first_url = f"/ws/rooms/{first['code']}?participant_id={first['participant_id']}"
+        second_url = f"/ws/rooms/{second['code']}?participant_id={second['participant_id']}"
+        with client.websocket_connect(first_url) as first_socket, client.websocket_connect(second_url) as second_socket:
+            consume_initial_room_messages(first_socket)
+            consume_initial_room_messages(second_socket)
+            first_socket.send_json({"type": "chat_send", "text": "only room one"})
+            assert first_socket.receive_json()["text"] == "only room one"
+            first_socket.send_json({"type": "reaction_send", "emoji": "🔥"})
+            assert first_socket.receive_json()["type"] == "reaction"
+            second_socket.send_json({"type": "ping"})
+            assert second_socket.receive_json() == {"type": "pong"}
+
+
+def test_broadcast_continues_when_one_disconnected_socket_fails() -> None:
+    class FakeSocket:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+            self.messages = []
+
+        async def accept(self) -> None:
+            pass
+
+        async def send_json(self, message) -> None:
+            if self.fail:
+                raise RuntimeError("socket is already disconnected")
+            self.messages.append(message)
+
+    manager = ConnectionManager()
+    failed_socket = FakeSocket(fail=True)
+    live_socket = FakeSocket()
+
+    async def broadcast() -> None:
+        await manager.connect("ROOM01", "gone", failed_socket)
+        await manager.connect("ROOM01", "live", live_socket)
+        await manager.broadcast("ROOM01", {"type": "chat_message", "text": "hello"})
+
+    asyncio.run(broadcast())
+    assert live_socket.messages == [{"type": "chat_message", "text": "hello"}]
