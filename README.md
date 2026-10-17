@@ -14,15 +14,18 @@ A beginner-friendly FastAPI foundation for a real-time college club Watch Party.
 - Synchronize play, pause, and seek controls through room-scoped playback commands.
 - Let the active host transfer ownership to another connected participant.
 - Send room-scoped live chat messages and a small set of emoji reactions.
+- Search and category-filter a small curated movie catalogue.
+- Maintain a room-scoped shared playlist and create/vote/close group polls.
 
-Shared playlists and polls are not implemented in this milestone.
+The movie catalogue is static and curated for this project; it is not live movie data.
 
 ## Project structure
 
 ```text
 src/vinnovatit_task/
   main.py          # FastAPI routes, page rendering, and WebSocket endpoint
-  room_store.py    # replaceable in-memory room and participant state
+  room_store.py    # replaceable in-memory room, playlist, poll, and participant state
+  movies.py        # static curated movie catalogue and title/category search
   connections.py   # room-scoped WebSocket registry and broadcasts
   templates/       # landing and room pages
   static/          # vanilla JavaScript and responsive CSS
@@ -47,7 +50,7 @@ uv run pytest
 node tests/test_room_ui.mjs
 ```
 
-The tests cover room creation, successful and invalid joins, page rendering, WebSocket participant events, playback state timing and host authorization, host transfer and reconnect behavior, chat/reaction validation and broadcasts, malformed messages, disconnected send failures, and room isolation.
+The tests cover room creation, successful and invalid joins, page rendering, WebSocket participant events, playback state timing and host authorization, host transfer and reconnect behavior, chat/reaction validation and broadcasts, movie search, playlist and poll rules, malformed messages, disconnected send failures, concurrent room actions, and room isolation. The JavaScript test protects the local autoplay fallback behavior.
 
 ## Playback behavior
 
@@ -85,6 +88,42 @@ Display names are trimmed and compared with Unicode-aware `casefold()` within a 
 Only the active host sees “Make host” buttons next to other connected participants. The browser sends `{"type":"host_transfer","target_participant_id":"..."}` over its room WebSocket. The server ignores any client-supplied host flag or username: it compares the WebSocket participant ID with the room's authoritative host ID, then verifies the target belongs to the same room and is connected. Self-transfer, malformed requests, guests, unknown IDs, and disconnected targets are rejected without changing the host. The store performs authorization and ownership mutation together under its lock; it changes the host before broadcasting a `host_transferred` room update. Playback state and position are not modified by transfer. Each play, pause, or seek command is separately authorized against the current active host, so the old host loses control and the new host gains it as soon as the transfer is applied.
 
 The current WebSocket protocol cannot distinguish a browser refresh from a permanent departure. On disconnect, the room is advertised as hostless and playback controls are unavailable, but ownership is not transferred or discarded. The original participant ID remains the owner internally; reconnecting with that same ID restores host status immediately. If the host never reconnects, the room remains hostless for its lifetime, and a participant cannot claim ownership automatically. No arbitrary timeout is used. Participant IDs are the existing session identity mechanism, not a full account/authentication system; production deployments would need stronger identity credentials.
+
+## Movie discovery, shared playlists, and polls
+
+`GET /api/movies` returns the curated catalogue and its category list. Optional `search` matches a title substring without case sensitivity; optional `category` filters by category. The catalogue is a small Python tuple in `src/vinnovatit_task/movies.py`: it contains stable IDs, title, category, year, a short description, playback URL, media type, and credit. It is static, not live movie data. The Sintel default is served from W3C as MP4; Big Buck Bunny and Tears of Steel use Wikimedia Commons 360p VP9 WebM transcodes of the Blender Foundation open movies. Their files are 35.8 MB and 55.4 MB respectively, and therefore can take time to buffer on slow connections. All three require an internet connection, and the WebM entries require browser WebM/VP9 support.
+
+The previously configured Big Buck Bunny and Tears of Steel URLs used the Google GTV sample bucket, which returned HTTP 403 with `application/xml` during verification. On 17 October 2026, read-only `curl.exe -I -L` checks followed redirects and confirmed Sintel returns HTTP 200 `video/mp4`, and the new Big Buck Bunny and Tears of Steel URLs each return HTTP 200 `video/webm`. These checks confirm availability and media MIME type at that time, not that every browser/network can play every byte range. The movie source and license links are shown beneath the player after selection.
+
+Browser-to-server WebSocket messages:
+
+```json
+{"type":"playlist_add","movie_id":"sintel-trailer"}
+{"type":"playlist_remove","movie_id":"sintel-trailer"}
+{"type":"playlist_select","movie_id":"sintel-trailer"}
+{"type":"poll_create","question":"Which film?","options":["Sintel","Big Buck Bunny"]}
+{"type":"poll_vote","poll_id":"...","option_id":"..."}
+{"type":"poll_close","poll_id":"..."}
+```
+
+Any connected room participant can add a catalogue movie. IDs are checked against the server catalogue and duplicate IDs are rejected. The participant who added an entry or the current host may remove it. Only the current connected host may select a movie, and it must already be in that room's playlist. Selection uses a server-owned catalogue URL, sets the authoritative playback state to paused at time zero, increments its revision, and broadcasts `playback_state` with the selected movie metadata. The normal host-only `playback_command` authorization remains in force.
+
+Playlist changes are broadcast as `playlist_updated` with the full playlist and a monotonically increasing `playlist_revision`. Initial `room_state` messages contain the playlist, so late joiners and reconnecting participants restore it. Every room owns separate in-memory playlist state.
+
+Poll questions are trimmed and limited to 1-160 characters. A poll needs 2-5 distinct, non-empty options, each at most 80 characters. The form has a labelled Remove button beside every option. Those buttons are disabled at the two-option minimum; Add option is disabled at five. Adding/removing rows renumbers labels without changing other option values. These are form-only controls: deleting an option before submission sends no WebSocket message and cannot alter an existing poll. The creator and each option receive stable UUIDs. Each participant can vote once per poll; votes cannot be changed. The store tracks participant-to-option votes and sends updated totals, but does not include voter identities or choices in room-wide updates. The voter receives a targeted `poll_vote_recorded` acknowledgement so their page can mark their choice. The poll creator or current connected host can close a poll; closed polls reject further votes. Poll creation, totals, and closure are broadcast as `poll_created`, `poll_updated`, and `poll_closed`. Only open polls are included in initial room state; already-closed polls are not persisted as history for late joiners.
+
+Malformed messages, unknown movie/poll/option IDs, duplicates, invalid option counts/text, repeat votes, closed polls, and unauthorized removals/closures/selections receive an `{ "type": "error", "detail": "..." }` event without closing the socket. `threading.Lock` protects every mutation so simultaneous conflicting requests resolve in a single order. Poll and playlist events are broadcast through the room-scoped connection manager, not to other rooms. User-authored question and option text is rendered with DOM `textContent`, not HTML injection.
+
+## Manual playlist and poll check
+
+1. Open one room in two browser windows. Search movie titles and change the category filter; try a title with no match.
+2. Add a movie from each window and confirm both playlist views update. Add the same movie again and confirm the server rejects the duplicate. The adder and host can remove entries; another guest cannot.
+3. As a guest, attempt `playlist_select` from the browser console/WebSocket and confirm an error with no playback change. As host, select a queued movie and confirm both windows load it paused at the beginning; then play/pause/seek using the usual host controls.
+4. In the poll form, add options until Add option disables at 5. Remove the first, a middle, and the last option and confirm the remaining text stays intact and labels renumber. At 2 options, confirm both Remove buttons are disabled. Create a poll and confirm the form resets to 2 options. Submit invalid counts, blank options, repeated options, an overlong question, and an overlong option through the WebSocket; expect errors.
+5. Vote from both participants and confirm totals update. Try voting twice from the same participant and confirm the second vote is rejected. Confirm a participant cannot close someone else's poll unless they are current host; creator and host can close it, after which voting is rejected.
+6. Refresh a window and confirm the playlist and active poll totals return. Its own prior vote is shown as already submitted. Create a second room and verify its playlist and polls start empty.
+
+These features are functionally covered by automated tests but have not been measured under concurrent browser load. No latency, participant capacity, or playback drift target is claimed as met.
 
 ## Manual host-transfer check
 

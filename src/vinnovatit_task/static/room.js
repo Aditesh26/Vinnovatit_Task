@@ -16,6 +16,17 @@ const chatInput = document.querySelector("#chat-input");
 const chatMessages = document.querySelector("#chat-messages");
 const reactionFeed = document.querySelector("#reaction-feed");
 const socialStatus = document.querySelector("#social-status");
+const movieSearch = document.querySelector("#movie-search");
+const movieCategory = document.querySelector("#movie-category");
+const movieCatalogue = document.querySelector("#movie-catalogue");
+const playlistList = document.querySelector("#playlist-list");
+const playlistStatus = document.querySelector("#playlist-status");
+const pollForm = document.querySelector("#poll-form");
+const pollQuestion = document.querySelector("#poll-question");
+const pollOptionsInputs = document.querySelector("#poll-options-inputs");
+const addPollOptionButton = document.querySelector("#add-poll-option");
+const pollStatus = document.querySelector("#poll-status");
+const pollList = document.querySelector("#poll-list");
 const MAX_CHAT_LENGTH = 500;
 const DRIFT_THRESHOLD_SECONDS = Number(document.body.dataset.driftThresholdSeconds) || 0.75;
 const DRIFT_CHECK_INTERVAL_MS = Number(document.body.dataset.driftCheckIntervalMs) || 1000;
@@ -31,6 +42,11 @@ let pendingForceCorrection = false;
 let restoreOnNextPlaybackState = true;
 let lastDriftCorrectionAt = 0;
 let currentHostId = null;
+let currentMovieId = "sintel-trailer";
+let currentMovieTitle = "Sintel";
+let playlistRevision = -1;
+const myVotes = new Map();
+const pollStates = new Map();
 
 function renderParticipants(participants, hostId) {
     currentHostId = hostId;
@@ -169,6 +185,137 @@ function renderChatMessage(data) {
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
+async function loadMovieCatalogue() {
+    const query = new URLSearchParams();
+    if (movieSearch.value.trim()) query.set("search", movieSearch.value.trim());
+    if (movieCategory.value) query.set("category", movieCategory.value);
+    try {
+        const response = await fetch(`/api/movies?${query.toString()}`);
+        if (!response.ok) throw new Error("Catalogue unavailable");
+        const data = await response.json();
+        movieCatalogue.replaceChildren();
+        const allOption = document.createElement("option"); allOption.value = ""; allOption.textContent = "All categories";
+        movieCategory.replaceChildren(allOption);
+        for (const category of data.categories) {
+            const option = document.createElement("option"); option.value = category; option.textContent = category;
+            movieCategory.append(option);
+        }
+        // Keep the selected filter when refreshing on a search keystroke.
+        if (data.categories.includes(movieCategory.dataset.selectedCategory)) movieCategory.value = movieCategory.dataset.selectedCategory;
+        for (const movie of data.movies) {
+            const item = document.createElement("li");
+            item.className = "movie-card";
+            const details = document.createElement("div");
+            const title = document.createElement("strong"); title.textContent = `${movie.title} (${movie.year})`;
+            const category = document.createElement("p"); category.textContent = movie.category;
+            const description = document.createElement("small"); description.textContent = movie.description;
+            details.append(title, category, description);
+            const addButton = document.createElement("button");
+            addButton.type = "button"; addButton.textContent = "Add to playlist";
+            addButton.addEventListener("click", () => sendSocialCommand({ type: "playlist_add", movie_id: movie.id }));
+            item.append(details, addButton); movieCatalogue.append(item);
+        }
+        if (!data.movies.length) {
+            const empty = document.createElement("li"); empty.className = "movie-empty";
+            empty.textContent = "No catalogue movies match those filters."; movieCatalogue.append(empty);
+        }
+        playlistStatus.textContent = "";
+    } catch {
+        movieCatalogue.replaceChildren();
+        const error = document.createElement("li"); error.className = "movie-empty";
+        error.textContent = "Movie catalogue could not be loaded. Check the room connection and try again.";
+        movieCatalogue.append(error);
+    }
+}
+
+function renderPlaylist(playlist, revision = playlistRevision) {
+    if (Number.isInteger(revision) && revision < playlistRevision) return;
+    if (Number.isInteger(revision)) playlistRevision = revision;
+    playlistList.replaceChildren();
+    for (const entry of playlist) {
+        const item = document.createElement("li"); item.className = "movie-card";
+        const details = document.createElement("div");
+        const title = document.createElement("strong"); title.textContent = `${entry.title} (${entry.year})`;
+        const byline = document.createElement("p"); byline.textContent = `${entry.category} · added by ${entry.added_by_name}`;
+        details.append(title, byline);
+        const actions = document.createElement("div");
+        if (currentHostId === participantId) {
+            const selectButton = document.createElement("button"); selectButton.type = "button";
+            selectButton.textContent = "Play this movie";
+            selectButton.addEventListener("click", () => sendSocialCommand({ type: "playlist_select", movie_id: entry.movie_id }));
+            actions.append(selectButton);
+        }
+        if (entry.added_by_id === participantId || currentHostId === participantId) {
+            const removeButton = document.createElement("button"); removeButton.type = "button";
+            removeButton.className = "secondary"; removeButton.textContent = "Remove";
+            removeButton.addEventListener("click", () => sendSocialCommand({ type: "playlist_remove", movie_id: entry.movie_id }));
+            actions.append(removeButton);
+        }
+        item.append(details, actions); playlistList.append(item);
+    }
+    if (!playlist.length) {
+        const empty = document.createElement("li"); empty.className = "movie-empty";
+        empty.textContent = "The shared playlist is empty. Add a movie from discovery."; playlistList.append(empty);
+    }
+}
+
+function renderPolls() {
+    pollList.replaceChildren();
+    for (const poll of pollStates.values()) {
+        const card = document.createElement("article"); card.className = "poll-card";
+        const question = document.createElement("h3"); question.textContent = poll.question;
+        const meta = document.createElement("p"); meta.className = "poll-meta";
+        meta.textContent = `${poll.creator_name} · ${poll.total_votes} vote${poll.total_votes === 1 ? "" : "s"} · ${poll.status}`;
+        card.append(question, meta);
+        const myVote = myVotes.get(poll.id) || poll.my_vote || null;
+        for (const option of poll.options) {
+            const row = document.createElement("div"); row.className = "poll-choice";
+            const voteButton = document.createElement("button"); voteButton.type = "button";
+            voteButton.textContent = myVote === option.id ? `Voted: ${option.text}` : option.text;
+            voteButton.disabled = poll.status !== "open" || Boolean(myVote);
+            voteButton.addEventListener("click", () => sendSocialCommand({ type: "poll_vote", poll_id: poll.id, option_id: option.id }));
+            const count = document.createElement("span"); count.textContent = `${option.votes} vote${option.votes === 1 ? "" : "s"}`;
+            row.append(voteButton, count); card.append(row);
+        }
+        if (poll.status === "open" && (poll.creator_id === participantId || currentHostId === participantId)) {
+            const closeButton = document.createElement("button"); closeButton.type = "button";
+            closeButton.className = "poll-close"; closeButton.textContent = "Close poll";
+            closeButton.addEventListener("click", () => sendSocialCommand({ type: "poll_close", poll_id: poll.id }));
+            card.append(closeButton);
+        }
+        pollList.append(card);
+    }
+}
+
+function acceptRoomState(data) {
+    renderParticipants(data.participants, data.host_id);
+    renderPlaylist(data.playlist || [], data.playlist_revision);
+    for (const poll of data.polls || []) {
+        const existingPoll = pollStates.get(poll.id);
+        if (existingPoll && Number(poll.revision) < Number(existingPoll.revision)) continue;
+        pollStates.set(poll.id, poll);
+        if (Object.hasOwn(poll, "my_vote")) {
+            if (poll.my_vote) myVotes.set(poll.id, poll.my_vote);
+            else myVotes.delete(poll.id);
+        }
+    }
+    renderPolls();
+}
+
+function applyPollEvent(data) {
+    if (!data.poll || typeof data.poll.id !== "string") return;
+    const existingPoll = pollStates.get(data.poll.id);
+    if (existingPoll && Number(data.poll.revision) < Number(existingPoll.revision)) return;
+    pollStates.set(data.poll.id, data.poll);
+    renderPolls();
+}
+
+function applyPollVoteAcknowledgement(data) {
+    if (typeof data.poll_id !== "string" || typeof data.option_id !== "string") return;
+    myVotes.set(data.poll_id, data.option_id);
+    renderPolls();
+}
+
 function renderReaction(data) {
     if (typeof data.sender !== "string" || typeof data.emoji !== "string") return;
     const item = document.createElement("span");
@@ -176,6 +323,24 @@ function renderReaction(data) {
     item.textContent = `${data.emoji} ${data.sender}`;
     reactionFeed.append(item);
     window.setTimeout(() => item.remove(), 5000);
+}
+
+function renderVideoCredit(movie) {
+    const credit = document.querySelector("#video-credit");
+    if (!credit) return;
+    const attribution = document.createElement("span");
+    attribution.textContent = `${movie.title} · ${movie.credit} · `;
+    const source = document.createElement("a");
+    source.href = movie.source_page;
+    source.target = "_blank";
+    source.rel = "noreferrer";
+    source.textContent = "source";
+    const license = document.createElement("a");
+    license.href = "https://creativecommons.org/licenses/by/3.0/";
+    license.target = "_blank";
+    license.rel = "noreferrer";
+    license.textContent = "CC BY 3.0";
+    credit.replaceChildren(attribution, source, document.createTextNode(" · "), license);
 }
 
 function connect() {
@@ -192,9 +357,11 @@ function connect() {
         let data;
         try { data = JSON.parse(event.data); }
         catch { message.textContent = "Received an unreadable room update."; return; }
-        if (data.type === "room_state") renderParticipants(data.participants, data.host_id);
+        if (data.type === "room_state") acceptRoomState(data);
         if (data.type === "host_transferred") {
             renderParticipants(data.participants, data.host_id);
+            renderPlaylist(data.playlist || []);
+            renderPolls();
             message.textContent = data.host_id === participantId ? "You are now the host." : "The host role was transferred.";
         }
         if (data.type === "playback_state") receivePlaybackState(data);
@@ -202,6 +369,9 @@ function connect() {
         if (data.type === "participant_left") message.textContent = "A participant left the room.";
         if (data.type === "chat_message") renderChatMessage(data);
         if (data.type === "reaction") renderReaction(data);
+        if (data.type === "playlist_updated") { renderPlaylist(data.playlist || [], data.playlist_revision); playlistStatus.textContent = ""; }
+        if (data.type === "poll_created" || data.type === "poll_updated" || data.type === "poll_closed") applyPollEvent(data);
+        if (data.type === "poll_vote_recorded") applyPollVoteAcknowledgement(data);
         if (data.type === "error") socialStatus.textContent = data.detail;
     };
     socket.onclose = () => {
@@ -236,7 +406,16 @@ function receivePlaybackState(state) {
         if (revision < authoritativePlayback.revision) return;
         if (revision === authoritativePlayback.revision && state.updated_at <= authoritativePlayback.updated_at) return;
     }
-    const forceCorrection = restoreOnNextPlaybackState || state.action === "seek";
+    const selectedMovie = state.movie;
+    const movieChanged = selectedMovie && typeof selectedMovie.id === "string" && selectedMovie.id !== currentMovieId;
+    if (movieChanged && typeof selectedMovie.video_url === "string") {
+        currentMovieId = selectedMovie.id;
+        currentMovieTitle = selectedMovie.title;
+        video.src = selectedMovie.video_url;
+        video.load();
+        renderVideoCredit(selectedMovie);
+    }
+    const forceCorrection = restoreOnNextPlaybackState || state.action === "seek" || state.action === "select" || movieChanged;
     restoreOnNextPlaybackState = false;
     authoritativePlayback = {
         paused: state.paused,
@@ -331,7 +510,7 @@ video.addEventListener("canplay", () => {
 });
 video.addEventListener("error", () => {
     hideSyncedPlaybackButton();
-    playbackNotice.textContent = "The sample video could not be loaded. Check your connection or try again later.";
+    playbackNotice.textContent = `${currentMovieTitle} could not be loaded. Check your connection or choose another movie from the playlist.`;
 });
 video.addEventListener("play", () => {
     if (localGesturePlayEventPending) {
@@ -368,6 +547,69 @@ document.querySelectorAll(".reaction-button").forEach((button) => {
     button.addEventListener("click", () => {
         sendSocialCommand({ type: "reaction_send", emoji: button.dataset.emoji });
     });
+});
+movieSearch.addEventListener("input", loadMovieCatalogue);
+movieCategory.addEventListener("change", () => {
+    movieCategory.dataset.selectedCategory = movieCategory.value;
+    loadMovieCatalogue();
+});
+function refreshPollOptionControls() {
+    const rows = pollOptionsInputs.querySelectorAll(".poll-option-row");
+    rows.forEach((row, index) => {
+        row.querySelector(".poll-option-label").textContent = `Option ${index + 1}`;
+        const removeButton = row.querySelector(".remove-poll-option");
+        removeButton.disabled = rows.length <= 2;
+        removeButton.setAttribute("aria-label", `Remove option ${index + 1}`);
+    });
+    addPollOptionButton.disabled = rows.length >= 5;
+}
+
+function createPollOptionRow(value = "") {
+    const row = document.createElement("div"); row.className = "poll-option-row";
+    const label = document.createElement("label");
+    const optionLabel = document.createElement("span"); optionLabel.className = "poll-option-label";
+    const input = document.createElement("input"); input.className = "poll-option-input"; input.maxLength = 80; input.required = true; input.value = value;
+    label.append(optionLabel, input);
+    const removeButton = document.createElement("button"); removeButton.type = "button";
+    removeButton.className = "remove-poll-option"; removeButton.textContent = "Remove";
+    removeButton.addEventListener("click", () => {
+        if (pollOptionsInputs.querySelectorAll(".poll-option-row").length <= 2) return;
+        row.remove();
+        refreshPollOptionControls();
+    });
+    row.append(label, removeButton);
+    return row;
+}
+
+pollOptionsInputs.querySelectorAll(".poll-option-row").forEach((row) => {
+    row.querySelector(".remove-poll-option").addEventListener("click", () => {
+        if (pollOptionsInputs.querySelectorAll(".poll-option-row").length <= 2) return;
+        row.remove();
+        refreshPollOptionControls();
+    });
+});
+refreshPollOptionControls();
+addPollOptionButton.addEventListener("click", () => {
+    const currentOptions = pollOptionsInputs.querySelectorAll(".poll-option-row");
+    if (currentOptions.length >= 5) { pollStatus.textContent = "Polls can have at most 5 options."; return; }
+    pollOptionsInputs.append(createPollOptionRow());
+    refreshPollOptionControls();
+});
+pollForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const options = Array.from(pollOptionsInputs.querySelectorAll(".poll-option-input"), (input) => input.value.trim()).filter(Boolean);
+    if (!pollQuestion.value.trim() || options.length < 2 || options.length > 5) {
+        pollStatus.textContent = "Enter a question and between 2 and 5 non-empty options."; return;
+    }
+    if (pollQuestion.value.trim().length > 160 || options.some((option) => option.length > 80)) {
+        pollStatus.textContent = "Questions allow 160 characters and options allow 80 characters."; return;
+    }
+    if (sendSocialCommand({ type: "poll_create", question: pollQuestion.value.trim(), options })) {
+        pollQuestion.value = "";
+        pollOptionsInputs.replaceChildren(createPollOptionRow(), createPollOptionRow());
+        refreshPollOptionControls();
+        pollStatus.textContent = "";
+    }
 });
 window.setInterval(checkPlaybackDrift, DRIFT_CHECK_INTERVAL_MS);
 startSyncedPlaybackButton.addEventListener("click", startSynchronizedPlaybackFromGesture);
@@ -408,3 +650,4 @@ document.querySelector("#copy-code").addEventListener("click", async () => {
 });
 window.addEventListener("beforeunload", () => window.clearTimeout(reconnectTimer));
 connect();
+loadMovieCatalogue();

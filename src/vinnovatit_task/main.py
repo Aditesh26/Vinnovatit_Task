@@ -21,10 +21,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from .connections import ConnectionManager
+from .movies import MOVIES, search_movies
 from .room_store import (
     DuplicateParticipantNameError,
     HostAuthorizationError,
     InvalidHostTransferError,
+    RoomActionError,
+    RoomPermissionError,
     RoomNotFoundError,
     RoomStore,
 )
@@ -34,6 +37,8 @@ DRIFT_CORRECTION_THRESHOLD_SECONDS = 0.75
 DRIFT_CHECK_INTERVAL_MS = 1_000
 DRIFT_CORRECTION_COOLDOWN_MS = 2_500
 MAX_CHAT_MESSAGE_LENGTH = 500
+MAX_POLL_QUESTION_LENGTH = 160
+MAX_POLL_OPTION_LENGTH = 80
 ALLOWED_REACTIONS = {"😂", "❤️", "🔥", "👏", "😮"}
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 store = RoomStore()
@@ -65,6 +70,13 @@ def room_payload(
 @app.get("/", response_class=HTMLResponse)
 async def landing_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html")
+
+
+@app.get("/api/movies")
+async def movie_catalog(search: str = "", category: str = "") -> dict[str, object]:
+    """Search the small static catalogue by title substring and category."""
+    categories = sorted({movie["category"] for movie in MOVIES}, key=str.casefold)
+    return {"movies": search_movies(search, category), "categories": categories}
 
 
 @app.post("/api/rooms", status_code=status.HTTP_201_CREATED)
@@ -125,7 +137,7 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
         await websocket.close(code=4409, reason=str(error))
         return
     await connections.connect(room_code, participant_id, websocket)
-    await connections.send(websocket, {"type": "room_state", **room.snapshot()})
+    await connections.send(websocket, {"type": "room_state", **room.snapshot(participant_id)})
     if joined:
         await connections.broadcast(
             room_code,
@@ -230,6 +242,63 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
                 # The store changes the authoritative host before this room-only
                 # broadcast, so every client sees the new role immediately.
                 await connections.broadcast(room_code, transfer_state)
+                continue
+            message_type = message.get("type")
+            if isinstance(message_type, str) and message_type in {"playlist_add", "playlist_remove", "playlist_select"}:
+                expected = {"type", "movie_id"}
+                movie_id = message.get("movie_id")
+                if set(message) != expected or not isinstance(movie_id, str) or not movie_id.strip():
+                    await connections.send(websocket, {"type": "error", "detail": "Playlist actions need a valid movie_id."})
+                    continue
+                try:
+                    if message_type == "playlist_add":
+                        event = store.add_playlist_movie(room_code, participant_id, movie_id)
+                    elif message_type == "playlist_remove":
+                        event = store.remove_playlist_movie(room_code, participant_id, movie_id)
+                    else:
+                        event = store.select_playlist_movie(room_code, participant_id, movie_id)
+                except (RoomActionError, RoomPermissionError, HostAuthorizationError) as error:
+                    await connections.send(websocket, {"type": "error", "detail": str(error)})
+                    continue
+                await connections.broadcast(room_code, event)
+                continue
+            if isinstance(message_type, str) and message_type in {"poll_create", "poll_vote", "poll_close"}:
+                try:
+                    kind = message_type
+                    if kind == "poll_create":
+                        question = message.get("question")
+                        options = message.get("options")
+                        if (
+                            set(message) != {"type", "question", "options"}
+                            or not isinstance(question, str)
+                            or len(question.strip()) > MAX_POLL_QUESTION_LENGTH
+                            or not isinstance(options, list)
+                            or not 2 <= len(options) <= 5
+                            or any(not isinstance(option, str) or len(option.strip()) > MAX_POLL_OPTION_LENGTH for option in options)
+                        ):
+                            raise RoomActionError("Poll creation needs a question and 2 to 5 text options within the length limits.")
+                        event = store.create_poll(room_code, participant_id, question, options)
+                    elif kind == "poll_vote":
+                        poll_id = message.get("poll_id")
+                        option_id = message.get("option_id")
+                        if set(message) != {"type", "poll_id", "option_id"} or not isinstance(poll_id, str) or not isinstance(option_id, str):
+                            raise RoomActionError("Poll votes need a poll_id and option_id.")
+                        event = store.vote_poll(room_code, participant_id, poll_id, option_id)
+                    else:
+                        poll_id = message.get("poll_id")
+                        if set(message) != {"type", "poll_id"} or not isinstance(poll_id, str):
+                            raise RoomActionError("Closing a poll needs a poll_id.")
+                        event = store.close_poll(room_code, participant_id, poll_id)
+                except (RoomActionError, RoomPermissionError) as error:
+                    await connections.send(websocket, {"type": "error", "detail": str(error)})
+                    continue
+                await connections.broadcast(room_code, event)
+                if kind == "poll_vote":
+                    await connections.send(websocket, {
+                        "type": "poll_vote_recorded",
+                        "poll_id": poll_id,
+                        "option_id": option_id,
+                    })
                 continue
             if message.get("type") != "playback_command":
                 await connections.send(

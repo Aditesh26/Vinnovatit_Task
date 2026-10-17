@@ -10,9 +10,13 @@ const roomScript = readFileSync(
 
 class FakeElement {
   constructor() {
+    this.tagName = "div";
     this.listeners = new Map();
     this.children = [];
     this.textContent = "";
+    this.value = "";
+    this.attributes = new Map();
+    this.className = "";
     this.classList = { add() {}, remove() {} };
     this.dataset = {};
     this.hidden = false;
@@ -28,14 +32,48 @@ class FakeElement {
   }
 
   append(...children) {
-    this.children.push(...children);
+    for (const child of children) {
+      child.parentElement = this;
+      this.children.push(child);
+    }
   }
 
   replaceChildren(...children) {
+    for (const child of this.children) child.parentElement = null;
     this.children = children;
+    for (const child of children) child.parentElement = this;
   }
 
-  remove() {}
+  querySelectorAll(selector) {
+    const className = selector.startsWith(".") ? selector.slice(1) : null;
+    const matches = [];
+    const visit = (node) => {
+      for (const child of node.children) {
+        if (className && child.className.split(/\s+/).includes(className)) matches.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches;
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  remove() {
+    if (!this.parentElement) return;
+    this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+    this.parentElement = null;
+  }
 }
 
 class FakeVideo extends FakeElement {
@@ -48,7 +86,13 @@ class FakeVideo extends FakeElement {
     this.paused = true;
     this.seeking = false;
     this.playCalls = 0;
+    this.loadCalls = 0;
     this.playResults = [new Error("autoplay blocked"), null];
+  }
+
+  load() {
+    this.loadCalls += 1;
+    this.readyState = 0;
   }
 
   play() {
@@ -91,6 +135,7 @@ function createGuestPage() {
     ["#participant-count", new FakeElement()],
     ["#room-message", new FakeElement()],
     ["#shared-video", new FakeVideo()],
+    ["#video-credit", new FakeElement()],
     ["#playback-notice", new FakeElement()],
     ["#start-synced-playback", new FakeElement()],
     ["#chat-form", new FakeElement()],
@@ -99,7 +144,28 @@ function createGuestPage() {
     ["#reaction-feed", new FakeElement()],
     ["#social-status", new FakeElement()],
     ["#copy-code", new FakeElement()],
+    ["#movie-search", new FakeElement()],
+    ["#movie-category", new FakeElement()],
+    ["#movie-catalogue", new FakeElement()],
+    ["#playlist-list", new FakeElement()],
+    ["#playlist-status", new FakeElement()],
+    ["#poll-form", new FakeElement()],
+    ["#poll-question", new FakeElement()],
+    ["#poll-options-inputs", new FakeElement()],
+    ["#add-poll-option", new FakeElement()],
+    ["#poll-status", new FakeElement()],
+    ["#poll-list", new FakeElement()],
   ]);
+  for (let index = 1; index <= 2; index += 1) {
+    const row = new FakeElement(); row.className = "poll-option-row";
+    const label = new FakeElement();
+    const text = new FakeElement(); text.className = "poll-option-label"; text.textContent = `Option ${index}`;
+    const input = new FakeElement(); input.className = "poll-option-input";
+    label.append(text, input);
+    const remove = new FakeElement(); remove.className = "remove-poll-option"; remove.disabled = true;
+    row.append(label, remove);
+    selectors.get("#poll-options-inputs").append(row);
+  }
   const document = {
     body: {
       dataset: {
@@ -111,7 +177,8 @@ function createGuestPage() {
     },
     querySelector: (selector) => selectors.get(selector),
     querySelectorAll: () => [],
-    createElement: () => new FakeElement(),
+    createElement: (tagName) => { const element = new FakeElement(); element.tagName = tagName; return element; },
+    createTextNode: (text) => { const node = new FakeElement(); node.textContent = text; return node; },
   };
   const window = {
     location: { protocol: "http:", host: "localhost:8000", href: "http://localhost:8000/rooms/ABC123" },
@@ -134,6 +201,7 @@ function createGuestPage() {
     JSON,
     Math,
     Number,
+    fetch: async () => ({ ok: true, json: async () => ({ movies: [], categories: [] }) }),
   };
   vm.runInNewContext(roomScript, context);
   const socket = FakeWebSocket.latest;
@@ -151,6 +219,10 @@ function createGuestPage() {
     video: selectors.get("#shared-video"),
     button: selectors.get("#start-synced-playback"),
     notice: selectors.get("#playback-notice"),
+    credit: selectors.get("#video-credit"),
+    options: selectors.get("#poll-options-inputs"),
+    addOption: selectors.get("#add-poll-option"),
+    pollStatus: selectors.get("#poll-status"),
   };
 }
 
@@ -200,4 +272,67 @@ test("autoplay fallback starts locally at server position without sending playba
   button.emit("click"); // even a stale/queued click must not resume a paused room
   assert.equal(video.playCalls, playCount);
   assert.deepEqual(socket.sent.filter((message) => message.type === "playback_command"), []);
+});
+
+test("poll option controls enforce limits, renumber rows, and preserve other inputs", () => {
+  const { options, addOption } = createGuestPage();
+  const rows = () => options.querySelectorAll(".poll-option-row");
+  const rowValues = () => rows().map((row) => row.querySelector(".poll-option-input").value);
+  const labels = () => rows().map((row) => row.querySelector(".poll-option-label").textContent);
+
+  rows()[0].querySelector(".poll-option-input").value = "Alpha";
+  rows()[1].querySelector(".poll-option-input").value = "Beta";
+  assert.deepEqual(rows().map((row) => row.querySelector(".remove-poll-option").disabled), [true, true]);
+
+  for (const value of ["Gamma", "Delta", "Epsilon"]) {
+    addOption.emit("click");
+    rows().at(-1).querySelector(".poll-option-input").value = value;
+  }
+  assert.equal(rows().length, 5);
+  assert.equal(addOption.disabled, true);
+  assert.deepEqual(labels(), ["Option 1", "Option 2", "Option 3", "Option 4", "Option 5"]);
+
+  rows()[0].querySelector(".remove-poll-option").emit("click");
+  assert.deepEqual(rowValues(), ["Beta", "Gamma", "Delta", "Epsilon"]);
+  assert.deepEqual(labels(), ["Option 1", "Option 2", "Option 3", "Option 4"]);
+  assert.equal(rows()[0].querySelector(".remove-poll-option").getAttribute("aria-label"), "Remove option 1");
+
+  rows()[1].querySelector(".remove-poll-option").emit("click");
+  assert.deepEqual(rowValues(), ["Beta", "Delta", "Epsilon"]);
+  assert.deepEqual(labels(), ["Option 1", "Option 2", "Option 3"]);
+
+  rows().at(-1).querySelector(".remove-poll-option").emit("click");
+  assert.deepEqual(rowValues(), ["Beta", "Delta"]);
+  assert.deepEqual(labels(), ["Option 1", "Option 2"]);
+  assert.equal(addOption.disabled, false);
+  rows()[0].querySelector(".remove-poll-option").emit("click");
+  assert.equal(rows().length, 2, "the minimum option count cannot be crossed");
+});
+
+test("host-selected catalogue media changes the local source and reports source errors", () => {
+  const { socket, video, notice, credit } = createGuestPage();
+  const bigBuckUrl = "https://upload.wikimedia.org/wikipedia/commons/transcoded/8/88/Big_Buck_Bunny_alt.webm/Big_Buck_Bunny_alt.webm.360p.vp9.webm";
+  socket.onmessage({ data: JSON.stringify({
+    type: "playback_state",
+    revision: 1,
+    action: "select",
+    paused: true,
+    position: 0,
+    updated_at: Date.now() / 1000,
+    movie: {
+      id: "big-buck-bunny",
+      title: "Big Buck Bunny",
+      video_url: bigBuckUrl,
+      media_type: "video/webm",
+      credit: "Blender Foundation, CC BY 3.0",
+      source_page: "https://commons.wikimedia.org/wiki/File:Big_Buck_Bunny_alt.webm",
+    },
+  }) });
+  assert.equal(video.src, bigBuckUrl);
+  assert.equal(video.loadCalls, 1);
+  assert.equal(video.playCalls, 0, "selecting a movie leaves the room paused");
+  assert.equal(credit.children[0].textContent, "Big Buck Bunny · Blender Foundation, CC BY 3.0 · ");
+
+  video.emit("error");
+  assert.match(notice.textContent, /Big Buck Bunny could not be loaded.*choose another movie/i);
 });

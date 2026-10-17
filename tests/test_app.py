@@ -6,10 +6,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from vinnovatit_task.main import app, store
 from vinnovatit_task.connections import ConnectionManager
+from vinnovatit_task.movies import MOVIES, MOVIES_BY_ID
 from vinnovatit_task.room_store import (
     DuplicateParticipantNameError,
     HostAuthorizationError,
     InvalidHostTransferError,
+    RoomActionError,
+    RoomPermissionError,
     RoomStore,
     calculate_playback_drift,
     estimate_playback_position,
@@ -56,6 +59,38 @@ def test_landing_and_valid_room_pages_render() -> None:
     assert 'id="chat-form"' in room_page.text
     assert 'data-emoji="😂"' in room_page.text
     assert 'id="start-synced-playback"' in room_page.text
+    assert 'id="movie-catalogue"' in room_page.text
+    assert 'id="poll-form"' in room_page.text
+    assert 'src="https://media.w3.org/2010/05/sintel/trailer.mp4"' in room_page.text
+
+
+def test_movie_catalogue_entries_have_browser_video_metadata_and_https_sources() -> None:
+    from urllib.parse import urlparse
+
+    assert set(MOVIES_BY_ID) == {"sintel-trailer", "big-buck-bunny", "tears-of-steel"}
+    for movie in MOVIES:
+        assert all(movie.get(field) for field in (
+            "id", "title", "category", "year", "description", "credit", "source_page",
+            "video_url", "media_type",
+        ))
+        url = urlparse(movie["video_url"])
+        assert url.scheme == "https"
+        assert url.netloc
+        assert movie["media_type"] in {"video/mp4", "video/webm"}
+        assert url.path.lower().endswith((".mp4", ".webm"))
+    assert MOVIES_BY_ID["big-buck-bunny"]["media_type"] == "video/webm"
+    assert MOVIES_BY_ID["tears-of-steel"]["media_type"] == "video/webm"
+
+
+def test_movie_catalogue_supports_title_search_and_category_filter() -> None:
+    with TestClient(app) as client:
+        all_movies = client.get("/api/movies").json()
+        searched = client.get("/api/movies", params={"search": "buck"}).json()
+        filtered = client.get("/api/movies", params={"category": "Fantasy"}).json()
+    assert len(all_movies["movies"]) >= 3
+    assert searched["movies"][0]["id"] == "big-buck-bunny"
+    assert all(movie["category"] == "Fantasy" for movie in filtered["movies"])
+    assert "video_url" in all_movies["movies"][0]
 
 
 def test_join_existing_room_and_reject_unknown_code() -> None:
@@ -217,6 +252,17 @@ def test_playback_state_estimates_position_while_playing() -> None:
         "updated_at": 100.0,
         "revision": 1,
         "action": "play",
+        "movie": {
+            "id": "sintel-trailer",
+            "title": "Sintel",
+            "category": "Fantasy",
+            "year": "2010",
+            "description": "A young woman searches for a lost dragon.",
+            "video_url": "https://media.w3.org/2010/05/sintel/trailer.mp4",
+            "media_type": "video/mp4",
+            "credit": "Blender Foundation, CC BY 3.0",
+            "source_page": "https://durian.blender.org/",
+        },
     }
     assert estimated["position"] == 15.75
     assert estimated["paused"] is False
@@ -709,3 +755,222 @@ def test_broadcast_continues_when_one_disconnected_socket_fails() -> None:
 
     asyncio.run(broadcast())
     assert live_socket.messages == [{"type": "chat_message", "text": "hello"}]
+
+
+def test_playlist_add_remove_duplicate_validation_and_permissions() -> None:
+    room_store = RoomStore()
+    room, host = room_store.create_room("Host")
+    room_store.connect_participant(room.code, host.id, host.name)
+    adder = room_store.add_participant(room.code, "Adder")
+    room_store.connect_participant(room.code, adder.id, adder.name)
+    guest = room_store.add_participant(room.code, "Guest")
+    room_store.connect_participant(room.code, guest.id, guest.name)
+
+    event = room_store.add_playlist_movie(room.code, adder.id, "big-buck-bunny")
+    assert event["type"] == "playlist_updated"
+    assert event["playlist"][0]["added_by_id"] == adder.id
+    assert event["playlist"][0]["title"] == "Big Buck Bunny"
+    with pytest.raises(RoomActionError, match="already in"):
+        room_store.add_playlist_movie(room.code, guest.id, "big-buck-bunny")
+    with pytest.raises(RoomActionError, match="not in the catalogue"):
+        room_store.add_playlist_movie(room.code, guest.id, "not-a-movie")
+    with pytest.raises(RoomPermissionError, match="Only the participant"):
+        room_store.remove_playlist_movie(room.code, guest.id, "big-buck-bunny")
+
+    selected = room_store.select_playlist_movie(room.code, host.id, "big-buck-bunny")
+    assert selected["action"] == "select"
+    assert selected["movie"]["id"] == "big-buck-bunny"
+    assert selected["paused"] is True and selected["position"] == 0
+    with pytest.raises(HostAuthorizationError):
+        room_store.select_playlist_movie(room.code, guest.id, "big-buck-bunny")
+    assert room.playback_revision == selected["revision"]
+
+    room_store.transfer_host(room.code, host.id, guest.id)
+    with pytest.raises(HostAuthorizationError):
+        room_store.select_playlist_movie(room.code, host.id, "big-buck-bunny")
+    selected_by_new_host = room_store.select_playlist_movie(room.code, guest.id, "big-buck-bunny")
+    assert selected_by_new_host["movie"]["id"] == "big-buck-bunny"
+
+    removed = room_store.remove_playlist_movie(room.code, adder.id, "big-buck-bunny")
+    assert removed["playlist"] == []
+    with pytest.raises(RoomActionError, match="not in the shared playlist"):
+        room_store.remove_playlist_movie(room.code, host.id, "big-buck-bunny")
+    room_store.add_playlist_movie(room.code, adder.id, "tears-of-steel")
+    host_removal = room_store.remove_playlist_movie(room.code, guest.id, "tears-of-steel")
+    assert host_removal["playlist"] == []
+
+
+def test_playlist_is_room_scoped_and_concurrent_duplicates_are_rejected() -> None:
+    from threading import Barrier
+
+    room_store = RoomStore()
+    first, first_host = room_store.create_room("First")
+    second, second_host = room_store.create_room("Second")
+    for room, host in ((first, first_host), (second, second_host)):
+        room_store.connect_participant(room.code, host.id, host.name)
+    one = room_store.add_participant(first.code, "One")
+    two = room_store.add_participant(first.code, "Two")
+    for participant in (one, two):
+        room_store.connect_participant(first.code, participant.id, participant.name)
+    start_together = Barrier(2)
+
+    def add() -> str:
+        start_together.wait()
+        try:
+            room_store.add_playlist_movie(first.code, one.id, "sintel-trailer")
+            return "added"
+        except RoomActionError:
+            return "duplicate"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: add(), range(2)))
+    assert sorted(results) == ["added", "duplicate"]
+    assert room_store.get_room(first.code).snapshot()["playlist"]
+    assert room_store.get_room(second.code).snapshot()["playlist"] == []
+
+
+def test_poll_validation_votes_and_close_permissions() -> None:
+    room_store = RoomStore()
+    room, host = room_store.create_room("Host")
+    room_store.connect_participant(room.code, host.id, host.name)
+    creator = room_store.add_participant(room.code, "Creator")
+    voter = room_store.add_participant(room.code, "Voter")
+    other = room_store.add_participant(room.code, "Other")
+    for participant in (creator, voter, other):
+        room_store.connect_participant(room.code, participant.id, participant.name)
+
+    for question, options in (("  ", ["A", "B"]), ("Question", ["Only one"]), ("Q", ["A"] * 6), ("Q", ["A", "a"]), ("Q", ["x" * 81, "B"])):
+        with pytest.raises(RoomActionError):
+            room_store.create_poll(room.code, creator.id, question, options)
+
+    created = room_store.create_poll(room.code, creator.id, "  Which film?  ", ["Sintel", "Bunny"])
+    poll = created["poll"]
+    assert poll["question"] == "Which film?"
+    assert poll["creator_id"] == creator.id
+    first_option, second_option = poll["options"]
+    with pytest.raises(RoomActionError, match="valid option"):
+        room_store.vote_poll(room.code, voter.id, poll["id"], "missing")
+    voted = room_store.vote_poll(room.code, voter.id, poll["id"], first_option["id"])
+    assert voted["poll"]["options"][0]["votes"] == 1
+    assert room.snapshot(voter.id)["polls"][0]["my_vote"] == first_option["id"]
+    assert room.snapshot(other.id)["polls"][0]["my_vote"] is None
+    with pytest.raises(RoomActionError, match="already voted"):
+        room_store.vote_poll(room.code, voter.id, poll["id"], second_option["id"])
+    with pytest.raises(RoomPermissionError, match="creator or current host"):
+        room_store.close_poll(room.code, other.id, poll["id"])
+    closed = room_store.close_poll(room.code, creator.id, poll["id"])
+    assert closed["poll"]["status"] == "closed"
+    with pytest.raises(RoomActionError, match="closed"):
+        room_store.vote_poll(room.code, other.id, poll["id"], first_option["id"])
+    with pytest.raises(RoomActionError, match="already closed"):
+        room_store.close_poll(room.code, creator.id, poll["id"])
+    assert room.snapshot(creator.id)["polls"] == []
+
+    host_poll = room_store.create_poll(room.code, creator.id, "Host can close?", ["Yes", "No"])["poll"]
+    assert room_store.close_poll(room.code, host.id, host_poll["id"])["poll"]["status"] == "closed"
+
+
+def test_concurrent_votes_allow_only_one_vote_per_participant() -> None:
+    from threading import Barrier
+
+    room_store = RoomStore()
+    room, host = room_store.create_room("Host")
+    room_store.connect_participant(room.code, host.id, host.name)
+    voter = room_store.add_participant(room.code, "Voter")
+    room_store.connect_participant(room.code, voter.id, voter.name)
+    poll = room_store.create_poll(room.code, host.id, "Pick one", ["A", "B"])["poll"]
+    choices = [option["id"] for option in poll["options"]]
+    start_together = Barrier(2)
+
+    def vote(option_id: str) -> str:
+        start_together.wait()
+        try:
+            room_store.vote_poll(room.code, voter.id, poll["id"], option_id)
+            return "voted"
+        except RoomActionError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(vote, choices))
+    assert sorted(results) == ["rejected", "voted"]
+    current = room.polls[poll["id"]]
+    assert len(current.votes) == 1
+    assert sum(option["votes"] for option in current.as_dict()["options"]) == 1
+
+
+def test_playlist_and_poll_broadcasts_are_isolated_and_restored_on_late_join() -> None:
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        other_room = create_room(client, "Other host")
+        host_url = f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}&name=Host"
+        other_url = f"/ws/rooms/{other_room['code']}?participant_id={other_room['participant_id']}&name=Other"
+        with client.websocket_connect(host_url) as host_socket, client.websocket_connect(other_url) as other_socket:
+            consume_initial_room_messages(host_socket)
+            consume_initial_room_messages(other_socket)
+            host_socket.send_json({"type": "playlist_add", "movie_id": "sintel-trailer"})
+            playlist_event = host_socket.receive_json()
+            assert playlist_event["type"] == "playlist_updated"
+            host_socket.send_json({"type": "poll_create", "question": "Which?", "options": ["Sintel", "Bunny"]})
+            created = host_socket.receive_json()
+            assert created["type"] == "poll_created"
+            poll = created["poll"]
+            host_socket.send_json({"type": "poll_vote", "poll_id": poll["id"], "option_id": poll["options"][0]["id"]})
+            updated = host_socket.receive_json()
+            assert updated["type"] == "poll_updated"
+            assert updated["poll"]["total_votes"] == 1
+            assert host_socket.receive_json()["type"] == "poll_vote_recorded"
+
+            guest, guest_url = connect_guest(client, room, "Late guest")
+            with client.websocket_connect(guest_url) as guest_socket:
+                initial = guest_socket.receive_json()
+                assert initial["type"] == "room_state"
+                assert initial["playlist"][0]["movie_id"] == "sintel-trailer"
+                restored_poll = initial["polls"][0]
+                assert restored_poll["total_votes"] == 1
+                assert restored_poll["my_vote"] is None
+                host_socket.receive_json()  # participant_joined
+                host_socket.receive_json()  # updated room_state
+                guest_socket.receive_json()  # participant_joined
+                guest_socket.receive_json()  # updated room_state
+                guest_socket.receive_json()  # playback_state
+                guest_socket.send_json({"type": "poll_vote", "poll_id": poll["id"], "option_id": poll["options"][1]["id"]})
+                host_update = host_socket.receive_json()
+                guest_update = guest_socket.receive_json()
+                assert host_update["poll"]["total_votes"] == guest_update["poll"]["total_votes"] == 2
+                vote_ack = guest_socket.receive_json()
+                assert vote_ack["type"] == "poll_vote_recorded"
+                assert vote_ack["option_id"] == poll["options"][1]["id"]
+
+                host_socket.send_json({"type": "poll_close", "poll_id": poll["id"]})
+                host_closed = host_socket.receive_json()
+                guest_closed = guest_socket.receive_json()
+                assert host_closed["type"] == guest_closed["type"] == "poll_closed"
+                assert host_closed["poll"]["status"] == "closed"
+
+                host_socket.send_json({"type": "playlist_remove", "movie_id": "sintel-trailer"})
+                host_playlist = host_socket.receive_json()
+                guest_playlist = guest_socket.receive_json()
+                assert host_playlist == guest_playlist
+                assert host_playlist["type"] == "playlist_updated"
+                assert host_playlist["playlist"] == []
+
+            other_socket.send_json({"type": "ping"})
+            assert other_socket.receive_json() == {"type": "pong"}
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": "playlist_add"},
+    {"type": "playlist_add", "movie_id": "missing"},
+    {"type": "poll_create", "question": "?", "options": ["one"]},
+    {"type": "poll_create", "question": "?", "options": ["one", 3]},
+    {"type": ["poll_create"]},
+])
+def test_invalid_playlist_and_poll_messages_return_errors(payload) -> None:
+    with TestClient(app) as client:
+        room = create_room(client)
+        with client.websocket_connect(f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}") as socket:
+            consume_initial_room_messages(socket)
+            socket.send_json(payload)
+            assert socket.receive_json()["type"] == "error"
+            socket.send_json({"type": "ping"})
+            assert socket.receive_json()["type"] == "pong"
