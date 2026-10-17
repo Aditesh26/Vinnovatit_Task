@@ -64,7 +64,39 @@ The browser checks drift once per second and seeks to the estimated server posit
 
 Room and playback state are held in process memory and every broadcast is scoped to its room code. Disconnects mark participants offline and notify remaining sockets. The browser reconnects after a disconnect; the same participant ID is reused for that browser session. New and reconnected sockets receive the current playback snapshot, with browser drift checks correcting large position differences. These behaviors have automated protocol and calculation tests, but have not been measured in real browsers under network or load conditions.
 
-No formal latency, 10-participant load, or post-correction playback-drift measurements have been run, so none of the project performance targets are claimed as met. The in-memory store also means rooms are lost when the server restarts and cannot be shared by multiple server processes. Playback commands accept a maximum position of 24 hours; the server does not know the media duration.
+The repeatable loopback benchmark is in `scripts/perf_room.py`. It uses HTTPX and the already-installed `websockets` package to create one isolated room, connect a host and guests, issue play/pause/seek commands, and measure time from the host client's send to each guest client's receipt. Run the app and benchmark in separate terminals:
+
+```powershell
+uv run uvicorn vinnovatit_task.main:app --host 127.0.0.1 --port 8765
+uv run python scripts/perf_room.py --base-url http://127.0.0.1:8765 --participants 10 --samples 100
+```
+
+### Recorded run (17 October 2026)
+
+- Environment: Windows 11 build 26300; Python 3.14.1; uv 0.12.0; FastAPI 0.143.1; Uvicorn 0.54.0; HTTPX 0.28.1; websockets 17.2; Intel Core Ultra 7 255HX, 20 logical CPUs. The app and benchmark client ran on the same machine over TCP loopback (`127.0.0.1`).
+- Participants: 10 simultaneous WebSocket connections (one host, nine guests); 10/10 connected, 0 connection failures.
+- Commands: 100 total (34 play, 33 pause, 33 seek). Expected guest deliveries: 900; received: 900; missing/invalid deliveries: 0; runtime errors: 0.
+- Host-send-to-guest-receipt latency, 900 guest samples: median 0.5167 ms; p95 (nearest-rank) 0.8719 ms; maximum 1.4626 ms.
+- The script closed every WebSocket. It created a unique room; the in-memory room remained until the temporary server process was stopped.
+
+This run demonstrates successful delivery with ten connected clients and a sub-250 ms p95 on this host's loopback path. It does **not** establish the stated local-network p95 target: loopback avoids real LAN/Wi-Fi, other devices, and network contention. It also does not include browser scheduling or video decoding. The 10-client result is a single short run, not a sustained-load/capacity test. No formal browser playback-drift measurement was made; the harness has no HTMLMediaElement or decoded playback clock, so the 500 ms post-correction drift target remains unverified.
+
+For a manual drift check, open the same room in two browsers, start playback from the host, and wait for a guest correction notice after causing or observing a seek/buffer interruption. In the guest DevTools console, sample this expression immediately after correction and repeat it over several corrections:
+
+```javascript
+(() => {
+  const v = document.querySelector("#shared-video");
+  const s = authoritativePlayback;
+  const target = s.paused ? s.position : s.position + Math.max(0, Date.now() / 1000 - s.updated_at);
+  return { localSeconds: v.currentTime, targetSeconds: target, driftMs: Math.round((v.currentTime - target) * 1000) };
+})()
+```
+
+Record at least 30 post-correction samples on each browser, along with browser versions, connection type, and observed sample count/median/p95/maximum. This compares the guest's media clock with the server-state estimate; clock skew and buffering still affect the result. Do not treat the message benchmark as video-drift evidence.
+
+Security caveat observed during this run: Uvicorn's default WebSocket access log included the host recovery token because it is currently sent in the query string. Avoid exposing these logs; a follow-up should move the recovery proof into an initial WebSocket auth message or redact sensitive query parameters before deploying beyond a trusted local setup.
+
+The in-memory store also means rooms are lost when the server restarts and cannot be shared by multiple server processes. Playback commands accept a maximum position of 24 hours; the server does not know the media duration.
 
 ## Chat and reactions
 
