@@ -43,6 +43,7 @@ function enterRoom(room) {
     const saved = saveRoomIdentity(room);
     const destination = new URL(room.room_url, window.location.origin);
     destination.searchParams.set("participant_id", room.participant_id);
+    destination.searchParams.set("name", room.participant_name);
     if (!saved && room.host_recovery_token) {
         showError("Browser storage is unavailable, so host recovery cannot be saved. Enable storage and try again.");
         return;
@@ -60,12 +61,16 @@ document.querySelector("#join-form").addEventListener("submit", async (event) =>
     event.preventDefault(); showError("");
     const code = event.currentTarget.code.value.trim().toUpperCase();
     if (!/^[A-Z0-9]{6}$/.test(code)) { showError("Enter the six-character room code from your invite."); return; }
+    const requestedName = event.currentTarget.name.value.trim();
+    if (!requestedName) { showError("Enter a display name to join the room."); return; }
     const savedIdentity = readSavedIdentity(code);
     if (savedIdentity) {
-        enterRoom({ code, ...savedIdentity, room_url: `/rooms/${code}` });
+        // Keep the room-local participant ID, but use the name currently in
+        // the form. The server validates uniqueness when the socket connects.
+        enterRoom({ code, ...savedIdentity, participant_name: requestedName, room_url: `/rooms/${code}` });
         return;
     }
-    try { enterRoom(await requestRoom(`/api/rooms/${code}/participants`, { name: event.currentTarget.name.value })); }
+    try { enterRoom(await requestRoom(`/api/rooms/${code}/participants`, { name: requestedName })); }
     catch (error) { showError(error.message); }
 });
 

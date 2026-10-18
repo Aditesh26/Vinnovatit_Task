@@ -66,12 +66,16 @@ async def run_check(
                 f"{ws_root}/ws/rooms/{room_code}?{host_query}", open_timeout=5
             )
             sockets.append(host)
-            await host.send(json.dumps({
-                "type": "room_connect",
-                "participant_id": room["participant_id"],
-                "name": room["participant_name"],
-                "recovery_token": room["host_recovery_token"],
-            }))
+            await host.send(
+                json.dumps(
+                    {
+                        "type": "room_connect",
+                        "participant_id": room["participant_id"],
+                        "name": room["participant_name"],
+                        "recovery_token": room["host_recovery_token"],
+                    }
+                )
+            )
             for expected_type in (
                 "room_state",
                 "participant_joined",
@@ -97,12 +101,16 @@ async def run_check(
                     f"{ws_root}/ws/rooms/{room_code}?{guest_query}", open_timeout=5
                 )
                 sockets.append(guest)
-                await guest.send(json.dumps({
-                    "type": "room_connect",
-                    "participant_id": guest_data["participant_id"],
-                    "name": guest_data["participant_name"],
-                    "recovery_token": None,
-                }))
+                await guest.send(
+                    json.dumps(
+                        {
+                            "type": "room_connect",
+                            "participant_id": guest_data["participant_id"],
+                            "name": guest_data["participant_name"],
+                            "recovery_token": None,
+                        }
+                    )
+                )
                 await expect_type(guest, "room_state")
 
                 # Each already connected socket receives one join notice and

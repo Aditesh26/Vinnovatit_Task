@@ -229,6 +229,7 @@ function createGuestPage(roomCode = "ABC123", storage = new Map()) {
     addOption: selectors.get("#add-poll-option"),
     pollStatus: selectors.get("#poll-status"),
     pollList: selectors.get("#poll-list"),
+    message: selectors.get("#room-message"),
     storage,
     identityRecovery: selectors.get("#identity-recovery"),
   };
@@ -351,13 +352,21 @@ test("malformed room identity storage falls back to a fresh session without thro
   assert.equal(JSON.parse(storage.get("watch-party:identity:ABC123")).participant_id, "guest-id");
 });
 
-test("rejected stale identity clears saved data and exposes the re-entry link", () => {
+test("name collision preserves saved identity and does not offer an in-room rename link", () => {
   const storage = new Map([["watch-party:identity:ABC123", JSON.stringify({ participant_id: "old-id", participant_name: "Old" })]]);
   const page = createGuestPage("ABC123", storage);
   page.socket.onclose({ code: 4409, reason: "Name unavailable" });
-  assert.equal(storage.has("watch-party:identity:ABC123"), false);
+  assert.equal(storage.has("watch-party:identity:ABC123"), true);
+  assert.equal(page.identityRecovery.hidden, true);
+  assert.equal(page.message.textContent, "Name unavailable");
+});
+
+test("missing room still offers a return-home link", () => {
+  const page = createGuestPage();
+  page.socket.onclose({ code: 4404, reason: "Room code not found" });
   assert.equal(page.identityRecovery.hidden, false);
-  assert.equal(page.identityRecovery.href, "/?room_code=ABC123");
+  assert.equal(page.identityRecovery.href, "/");
+  assert.equal(page.identityRecovery.textContent, "Return home");
 });
 
 test("host recovery credentials use a separate room-local key", () => {

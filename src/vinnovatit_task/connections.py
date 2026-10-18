@@ -42,7 +42,7 @@ class ConnectionManager:
     async def send(self, websocket: WebSocket, message: dict[str, object]) -> None:
         try:
             await websocket.send_json(message)
-        except (RuntimeError, OSError, WebSocketDisconnect):
+        except RuntimeError, OSError, WebSocketDisconnect:
             pass
 
     async def send_to_participant(

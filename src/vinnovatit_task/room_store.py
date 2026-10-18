@@ -33,7 +33,9 @@ def calculate_playback_drift(
     now: float,
 ) -> float:
     """Return signed local-minus-authoritative drift in seconds."""
-    return local_position - estimate_playback_position(position, paused, updated_at, now)
+    return local_position - estimate_playback_position(
+        position, paused, updated_at, now
+    )
 
 
 @dataclass
@@ -78,7 +80,11 @@ class Room:
             "participants": [p.as_dict() for p in self.participants.values()],
             "playlist": [dict(entry) for entry in self.playlist],
             "playlist_revision": self.playlist_revision,
-            "polls": [poll.as_dict(participant_id) for poll in self.polls.values() if poll.open],
+            "polls": [
+                poll.as_dict(participant_id)
+                for poll in self.polls.values()
+                if poll.open
+            ],
         }
 
     def playback_snapshot(self, now: float | None = None) -> dict[str, object]:
@@ -99,7 +105,9 @@ class Room:
             "movie": dict(MOVIES_BY_ID[self.current_movie_id]),
         }
 
-    def set_playback(self, action: str, position: float, now: float | None = None) -> dict[str, object]:
+    def set_playback(
+        self, action: str, position: float, now: float | None = None
+    ) -> dict[str, object]:
         """Apply one validated command and return the new server state."""
         updated_at = time() if now is None else now
         self.playback_position = position
@@ -126,7 +134,9 @@ class RoomPoll:
 
     def as_dict(self, participant_id: str | None = None) -> dict[str, object]:
         totals = {
-            option["id"]: sum(voted_option == option["id"] for voted_option in self.votes.values())
+            option["id"]: sum(
+                voted_option == option["id"] for voted_option in self.votes.values()
+            )
             for option in self.options
         }
         result: dict[str, object] = {
@@ -134,7 +144,9 @@ class RoomPoll:
             "question": self.question,
             "creator_id": self.creator_id,
             "creator_name": self.creator_name,
-            "options": [dict(option, votes=totals[option["id"]]) for option in self.options],
+            "options": [
+                dict(option, votes=totals[option["id"]]) for option in self.options
+            ],
             "status": "open" if self.open else "closed",
             "total_votes": len(self.votes),
             "revision": self.revision,
@@ -193,7 +205,9 @@ class RoomStore:
         with self._participant_lock:
             room = self.get_room(code)
             if room.host_id != participant_id:
-                raise HostAuthorizationError("Only the room owner can receive its recovery token.")
+                raise HostAuthorizationError(
+                    "Only the room owner can receive its recovery token."
+                )
             token = token_urlsafe(32)
             room.host_recovery_verifier = self._token_verifier(token)
             return token
@@ -214,24 +228,41 @@ class RoomStore:
             return participant
 
     def connect_participant(
-        self, code: str, participant_id: str, name: str,
+        self,
+        code: str,
+        participant_id: str,
+        name: str,
         recovery_token: str | None = None,
-    ) -> tuple[Room, Participant, bool]:
+    ) -> tuple[Room, Participant, bool, bool]:
         with self._participant_lock:
             room = self.get_room(code)
-            if room.host_id == participant_id and room.host_recovery_verifier is not None:
+            if (
+                room.host_id == participant_id
+                and room.host_recovery_verifier is not None
+            ):
                 supplied_verifier = self._token_verifier(recovery_token or "")
                 if not compare_digest(room.host_recovery_verifier, supplied_verifier):
-                    raise HostRecoveryError("Host recovery could not be verified. Re-enter your name to join as a guest.")
+                    raise HostRecoveryError(
+                        "Host recovery could not be verified. The saved host session cannot be restored."
+                    )
             participant = room.participants.get(participant_id)
+            name_changed = False
             if participant is None:
                 clean_name = self._clean_name(name, "Guest")
                 self._ensure_name_available(room, clean_name)
                 participant = Participant(id=participant_id, name=clean_name)
                 room.participants[participant.id] = participant
+            else:
+                clean_name = self._clean_name(name, participant.name)
+                if clean_name != participant.name:
+                    self._ensure_name_available(
+                        room, clean_name, excluding_id=participant_id
+                    )
+                    participant.name = clean_name
+                    name_changed = True
             was_connected = participant.connected
             participant.connected = True
-            return room, participant, not was_connected
+            return room, participant, not was_connected, name_changed
 
     @staticmethod
     def _token_verifier(token: str) -> str:
@@ -252,12 +283,18 @@ class RoomStore:
         with self._participant_lock:
             room = self.get_room(code)
             if room.active_host_id != sender_id:
-                raise HostAuthorizationError("Only the current connected host can transfer host privileges.")
+                raise HostAuthorizationError(
+                    "Only the current connected host can transfer host privileges."
+                )
             if target_id == sender_id:
-                raise InvalidHostTransferError("You are already the host. Choose another participant.")
+                raise InvalidHostTransferError(
+                    "You are already the host. Choose another participant."
+                )
             target = room.participants.get(target_id)
             if target is None or not target.connected:
-                raise InvalidHostTransferError("Choose a participant who is currently connected to this room.")
+                raise InvalidHostTransferError(
+                    "Choose a participant who is currently connected to this room."
+                )
 
             previous_host_id = room.host_id
             room.host_id = target_id
@@ -270,7 +307,9 @@ class RoomStore:
                 **room.snapshot(),
             }
 
-    def set_playback(self, code: str, action: str, position: float) -> dict[str, object]:
+    def set_playback(
+        self, code: str, action: str, position: float
+    ) -> dict[str, object]:
         """Update playback for one room and return its authoritative state."""
         return self.get_room(code).set_playback(action, position)
 
@@ -281,10 +320,14 @@ class RoomStore:
         with self._participant_lock:
             room = self.get_room(code)
             if room.active_host_id != participant_id:
-                raise HostAuthorizationError("Only the current connected host can control playback.")
+                raise HostAuthorizationError(
+                    "Only the current connected host can control playback."
+                )
             return room.set_playback(action, position)
 
-    def add_playlist_movie(self, code: str, participant_id: str, movie_id: str) -> dict[str, object]:
+    def add_playlist_movie(
+        self, code: str, participant_id: str, movie_id: str
+    ) -> dict[str, object]:
         with self._participant_lock:
             room = self.get_room(code)
             participant = self._connected_participant(room, participant_id)
@@ -293,36 +336,59 @@ class RoomStore:
                 raise RoomActionError("That movie is not in the catalogue.")
             if any(entry["movie_id"] == movie_id for entry in room.playlist):
                 raise RoomActionError("That movie is already in the shared playlist.")
-            room.playlist.append({
-                "movie_id": movie_id,
-                "title": movie["title"],
-                "category": movie["category"],
-                "year": movie["year"],
-                "description": movie["description"],
-                "added_by_id": participant.id,
-                "added_by_name": participant.name,
-            })
+            room.playlist.append(
+                {
+                    "movie_id": movie_id,
+                    "title": movie["title"],
+                    "category": movie["category"],
+                    "year": movie["year"],
+                    "description": movie["description"],
+                    "added_by_id": participant.id,
+                    "added_by_name": participant.name,
+                }
+            )
             room.playlist_revision += 1
-            return {"type": "playlist_updated", "playlist_revision": room.playlist_revision, "playlist": [dict(entry) for entry in room.playlist]}
+            return {
+                "type": "playlist_updated",
+                "playlist_revision": room.playlist_revision,
+                "playlist": [dict(entry) for entry in room.playlist],
+            }
 
-    def remove_playlist_movie(self, code: str, participant_id: str, movie_id: str) -> dict[str, object]:
+    def remove_playlist_movie(
+        self, code: str, participant_id: str, movie_id: str
+    ) -> dict[str, object]:
         with self._participant_lock:
             room = self.get_room(code)
             participant = self._connected_participant(room, participant_id)
-            entry = next((item for item in room.playlist if item["movie_id"] == movie_id), None)
+            entry = next(
+                (item for item in room.playlist if item["movie_id"] == movie_id), None
+            )
             if entry is None:
                 raise RoomActionError("That movie is not in the shared playlist.")
-            if entry["added_by_id"] != participant_id and room.active_host_id != participant_id:
-                raise RoomPermissionError("Only the participant who added a movie or the host can remove it.")
+            if (
+                entry["added_by_id"] != participant_id
+                and room.active_host_id != participant_id
+            ):
+                raise RoomPermissionError(
+                    "Only the participant who added a movie or the host can remove it."
+                )
             room.playlist.remove(entry)
             room.playlist_revision += 1
-            return {"type": "playlist_updated", "playlist_revision": room.playlist_revision, "playlist": [dict(item) for item in room.playlist]}
+            return {
+                "type": "playlist_updated",
+                "playlist_revision": room.playlist_revision,
+                "playlist": [dict(item) for item in room.playlist],
+            }
 
-    def select_playlist_movie(self, code: str, participant_id: str, movie_id: str) -> dict[str, object]:
+    def select_playlist_movie(
+        self, code: str, participant_id: str, movie_id: str
+    ) -> dict[str, object]:
         with self._participant_lock:
             room = self.get_room(code)
             if room.active_host_id != participant_id:
-                raise HostAuthorizationError("Only the current connected host can select a movie for playback.")
+                raise HostAuthorizationError(
+                    "Only the current connected host can select a movie for playback."
+                )
             if not any(entry["movie_id"] == movie_id for entry in room.playlist):
                 raise RoomActionError("Choose a movie that is in the shared playlist.")
             room.current_movie_id = movie_id
@@ -333,29 +399,41 @@ class RoomStore:
             room.playback_action = "select"
             return room.playback_snapshot()
 
-    def create_poll(self, code: str, participant_id: str, question: str, options: list[str]) -> dict[str, object]:
+    def create_poll(
+        self, code: str, participant_id: str, question: str, options: list[str]
+    ) -> dict[str, object]:
         with self._participant_lock:
             room = self.get_room(code)
             participant = self._connected_participant(room, participant_id)
             clean_question = question.strip()
             clean_options = [option.strip() for option in options]
             if not 1 <= len(clean_question) <= 160:
-                raise RoomActionError("Poll questions must contain 1 to 160 characters.")
+                raise RoomActionError(
+                    "Poll questions must contain 1 to 160 characters."
+                )
             if not 2 <= len(clean_options) <= 5:
                 raise RoomActionError("Polls need between 2 and 5 options.")
             if any(not option or len(option) > 80 for option in clean_options):
                 raise RoomActionError("Poll options must contain 1 to 80 characters.")
-            if len({option.casefold() for option in clean_options}) != len(clean_options):
+            if len({option.casefold() for option in clean_options}) != len(
+                clean_options
+            ):
                 raise RoomActionError("Poll options must be different.")
             poll = RoomPoll(
-                id=str(uuid4()), question=clean_question, creator_id=participant.id,
+                id=str(uuid4()),
+                question=clean_question,
+                creator_id=participant.id,
                 creator_name=participant.name,
-                options=[{"id": str(uuid4()), "text": option} for option in clean_options],
+                options=[
+                    {"id": str(uuid4()), "text": option} for option in clean_options
+                ],
             )
             room.polls[poll.id] = poll
             return {"type": "poll_created", "poll": poll.as_dict()}
 
-    def vote_poll(self, code: str, participant_id: str, poll_id: str, option_id: str) -> dict[str, object]:
+    def vote_poll(
+        self, code: str, participant_id: str, poll_id: str, option_id: str
+    ) -> dict[str, object]:
         with self._participant_lock:
             room = self.get_room(code)
             self._connected_participant(room, participant_id)
@@ -384,15 +462,22 @@ class RoomStore:
             }
             return event
 
-    def close_poll(self, code: str, participant_id: str, poll_id: str) -> dict[str, object]:
+    def close_poll(
+        self, code: str, participant_id: str, poll_id: str
+    ) -> dict[str, object]:
         with self._participant_lock:
             room = self.get_room(code)
             participant = self._connected_participant(room, participant_id)
             poll = room.polls.get(poll_id)
             if poll is None:
                 raise RoomActionError("That poll does not exist in this room.")
-            if participant_id != poll.creator_id and room.active_host_id != participant_id:
-                raise RoomPermissionError("Only the poll creator or current host can close this poll.")
+            if (
+                participant_id != poll.creator_id
+                and room.active_host_id != participant_id
+            ):
+                raise RoomPermissionError(
+                    "Only the poll creator or current host can close this poll."
+                )
             if not poll.open:
                 raise RoomActionError("This poll is already closed.")
             poll.open = False
@@ -403,7 +488,9 @@ class RoomStore:
     def _connected_participant(room: Room, participant_id: str) -> Participant:
         participant = room.participants.get(participant_id)
         if participant is None or not participant.connected:
-            raise RoomActionError("Your participant session is unavailable. Rejoin the room.")
+            raise RoomActionError(
+                "Your participant session is unavailable. Rejoin the room."
+            )
         return participant
 
     def _new_code(self) -> str:
@@ -413,9 +500,15 @@ class RoomStore:
                 return code
 
     @staticmethod
-    def _ensure_name_available(room: Room, name: str) -> None:
+    def _ensure_name_available(
+        room: Room, name: str, *, excluding_id: str | None = None
+    ) -> None:
         requested_name = name.casefold()
-        if any(participant.name.casefold() == requested_name for participant in room.participants.values()):
+        if any(
+            participant_id != excluding_id
+            and participant.name.casefold() == requested_name
+            for participant_id, participant in room.participants.items()
+        ):
             raise DuplicateParticipantNameError(
                 "That display name is already in use in this room. Please choose another name."
             )

@@ -6,10 +6,13 @@
     <title>Room {{ room_code }} - Watch Party</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
-  <body class="room-page" data-room-code="{{ room_code }}"
+  <body
+    class="room-page"
+    data-room-code="{{ room_code }}"
     data-drift-threshold-seconds="{{ drift_threshold_seconds }}"
     data-drift-check-interval-ms="{{ drift_check_interval_ms }}"
-    data-drift-correction-cooldown-ms="{{ drift_correction_cooldown_ms }}">
+    data-drift-correction-cooldown-ms="{{ drift_correction_cooldown_ms }}"
+  >
     <main class="room-shell">
       <nav>
         <a class="brand" href="/">watch<span>party</span></a
@@ -25,14 +28,39 @@
       <section class="watch-layout">
         <div class="player-card">
           <video id="shared-video" controls preload="metadata" playsinline>
-            <source src="https://media.w3.org/2010/05/sintel/trailer.mp4" type="video/mp4" />
+            <source
+              src="https://media.w3.org/2010/05/sintel/trailer.mp4"
+              type="video/mp4"
+            />
             Your browser does not support HTML5 video.
           </video>
-          <p id="playback-notice" class="playback-notice" role="status" aria-live="polite"></p>
-          <button id="start-synced-playback" class="start-synced-playback" type="button" hidden disabled>
+          <p
+            id="playback-notice"
+            class="playback-notice"
+            role="status"
+            aria-live="polite"
+          ></p>
+          <button
+            id="start-synced-playback"
+            class="start-synced-playback"
+            type="button"
+            hidden
+            disabled
+          >
             Click to start synchronized playback
           </button>
-          <small id="video-credit" class="video-credit">Sample: <a href="https://www.sintel.org/" target="_blank" rel="noreferrer">Sintel trailer</a>, Blender Foundation, <a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noreferrer">CC BY 3.0</a>.</small>
+          <small id="video-credit" class="video-credit"
+            >Sample:
+            <a href="https://www.sintel.org/" target="_blank" rel="noreferrer"
+              >Sintel trailer</a
+            >, Blender Foundation,
+            <a
+              href="https://creativecommons.org/licenses/by/3.0/"
+              target="_blank"
+              rel="noreferrer"
+              >CC BY 3.0</a
+            >.</small
+          >
         </div>
         <aside class="participants-panel">
           <div class="panel-heading">
@@ -41,45 +69,121 @@
           </div>
           <ul id="participant-list" aria-live="polite"></ul>
           <p id="room-message" class="room-message" aria-live="polite"></p>
-          <a id="identity-recovery" class="identity-recovery" href="/?room_code={{ room_code }}" hidden>Re-enter your name</a>
+          <a id="identity-recovery" class="identity-recovery" href="/" hidden
+            >Return home</a
+          >
         </aside>
       </section>
       <section class="rooms-tools-grid" aria-label="Shared movie tools">
-        <section class="tool-panel discovery-panel" aria-labelledby="discovery-title">
-          <div class="panel-heading"><div><p class="eyebrow">PICK THE NEXT FILM</p><h2 id="discovery-title">Movie discovery</h2></div></div>
-          <div class="discovery-filters">
-            <label class="visually-hidden" for="movie-search">Search movie titles</label>
-            <input id="movie-search" type="search" placeholder="Search titles..." autocomplete="off" />
-            <label class="visually-hidden" for="movie-category">Filter by category</label>
-            <select id="movie-category"><option value="">All categories</option></select>
+        <section
+          class="tool-panel discovery-panel"
+          aria-labelledby="discovery-title"
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">PICK THE NEXT FILM</p>
+              <h2 id="discovery-title">Movie discovery</h2>
+            </div>
           </div>
-          <p class="catalogue-note">A small curated catalogue of open films; not live movie data.</p>
+          <div class="discovery-filters">
+            <label class="visually-hidden" for="movie-search"
+              >Search movie titles</label
+            >
+            <input
+              id="movie-search"
+              type="search"
+              placeholder="Search titles..."
+              autocomplete="off"
+            />
+            <label class="visually-hidden" for="movie-category"
+              >Filter by category</label
+            >
+            <select id="movie-category">
+              <option value="">All categories</option>
+            </select>
+          </div>
+          <p class="catalogue-note">
+            A small curated catalogue of open films; not live movie data.
+          </p>
           <ul id="movie-catalogue" class="movie-list" aria-live="polite"></ul>
         </section>
-        <section class="tool-panel playlist-panel" aria-labelledby="playlist-title">
-          <div class="panel-heading"><div><p class="eyebrow">ROOM QUEUE</p><h2 id="playlist-title">Shared playlist</h2></div></div>
+        <section
+          class="tool-panel playlist-panel"
+          aria-labelledby="playlist-title"
+        >
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">ROOM QUEUE</p>
+              <h2 id="playlist-title">Shared playlist</h2>
+            </div>
+          </div>
           <ul id="playlist-list" class="movie-list" aria-live="polite"></ul>
-          <p id="playlist-status" class="tool-status" role="status" aria-live="polite"></p>
+          <p
+            id="playlist-status"
+            class="tool-status"
+            role="status"
+            aria-live="polite"
+          ></p>
         </section>
       </section>
       <section class="social-panel polls-panel" aria-labelledby="polls-title">
-        <div class="social-heading"><div><p class="eyebrow">MAKE A GROUP DECISION</p><h2 id="polls-title">Room polls</h2></div><span class="chat-limit">Change your vote until a poll closes</span></div>
+        <div class="social-heading">
+          <div>
+            <p class="eyebrow">MAKE A GROUP DECISION</p>
+            <h2 id="polls-title">Room polls</h2>
+          </div>
+          <span class="chat-limit">Change your vote until a poll closes</span>
+        </div>
         <form id="poll-form" class="poll-form">
           <label for="poll-question">Question</label>
-          <input id="poll-question" maxlength="160" required placeholder="What should we watch next?" />
+          <input
+            id="poll-question"
+            maxlength="160"
+            required
+            placeholder="What should we watch next?"
+          />
           <div id="poll-options-inputs" class="poll-options-inputs">
             <div class="poll-option-row">
-              <label><span class="poll-option-label">Option 1</span><input class="poll-option-input" maxlength="80" required /></label>
-              <button class="remove-poll-option" type="button" aria-label="Remove option 1" disabled>Remove</button>
+              <label
+                ><span class="poll-option-label">Option 1</span
+                ><input class="poll-option-input" maxlength="80" required
+              /></label>
+              <button
+                class="remove-poll-option"
+                type="button"
+                aria-label="Remove option 1"
+                disabled
+              >
+                Remove
+              </button>
             </div>
             <div class="poll-option-row">
-              <label><span class="poll-option-label">Option 2</span><input class="poll-option-input" maxlength="80" required /></label>
-              <button class="remove-poll-option" type="button" aria-label="Remove option 2" disabled>Remove</button>
+              <label
+                ><span class="poll-option-label">Option 2</span
+                ><input class="poll-option-input" maxlength="80" required
+              /></label>
+              <button
+                class="remove-poll-option"
+                type="button"
+                aria-label="Remove option 2"
+                disabled
+              >
+                Remove
+              </button>
             </div>
           </div>
-          <div class="poll-form-actions"><button id="add-poll-option" type="button" class="secondary">Add option</button><button type="submit">Create poll</button></div>
+          <div class="poll-form-actions">
+            <button id="add-poll-option" type="button" class="secondary">
+              Add option</button
+            ><button type="submit">Create poll</button>
+          </div>
         </form>
-        <p id="poll-status" class="tool-status" role="status" aria-live="polite"></p>
+        <p
+          id="poll-status"
+          class="tool-status"
+          role="status"
+          aria-live="polite"
+        ></p>
         <div id="poll-list" class="poll-list" aria-live="polite"></div>
       </section>
       <section class="social-panel" aria-label="Room chat and reactions">
@@ -92,18 +196,76 @@
         </div>
         <div class="reaction-row" aria-label="Send a reaction">
           <span>React:</span>
-          <button class="reaction-button" type="button" data-emoji="😂" aria-label="Laugh">😂</button>
-          <button class="reaction-button" type="button" data-emoji="❤️" aria-label="Love">❤️</button>
-          <button class="reaction-button" type="button" data-emoji="🔥" aria-label="Fire">🔥</button>
-          <button class="reaction-button" type="button" data-emoji="👏" aria-label="Applause">👏</button>
-          <button class="reaction-button" type="button" data-emoji="😮" aria-label="Surprised">😮</button>
+          <button
+            class="reaction-button"
+            type="button"
+            data-emoji="😂"
+            aria-label="Laugh"
+          >
+            😂
+          </button>
+          <button
+            class="reaction-button"
+            type="button"
+            data-emoji="❤️"
+            aria-label="Love"
+          >
+            ❤️
+          </button>
+          <button
+            class="reaction-button"
+            type="button"
+            data-emoji="🔥"
+            aria-label="Fire"
+          >
+            🔥
+          </button>
+          <button
+            class="reaction-button"
+            type="button"
+            data-emoji="👏"
+            aria-label="Applause"
+          >
+            👏
+          </button>
+          <button
+            class="reaction-button"
+            type="button"
+            data-emoji="😮"
+            aria-label="Surprised"
+          >
+            😮
+          </button>
         </div>
-        <ol id="chat-messages" class="chat-messages" aria-live="polite" aria-label="Room messages"></ol>
-        <div id="reaction-feed" class="reaction-feed" aria-live="polite" aria-label="Recent reactions"></div>
-        <p id="social-status" class="social-status" role="status" aria-live="polite"></p>
+        <ol
+          id="chat-messages"
+          class="chat-messages"
+          aria-live="polite"
+          aria-label="Room messages"
+        ></ol>
+        <div
+          id="reaction-feed"
+          class="reaction-feed"
+          aria-live="polite"
+          aria-label="Recent reactions"
+        ></div>
+        <p
+          id="social-status"
+          class="social-status"
+          role="status"
+          aria-live="polite"
+        ></p>
         <form id="chat-form" class="chat-form">
-          <label class="visually-hidden" for="chat-input">Write a message</label>
-          <input id="chat-input" name="text" maxlength="500" autocomplete="off" placeholder="Say something to the room..." />
+          <label class="visually-hidden" for="chat-input"
+            >Write a message</label
+          >
+          <input
+            id="chat-input"
+            name="text"
+            maxlength="500"
+            autocomplete="off"
+            placeholder="Say something to the room..."
+          />
           <button type="submit">Send</button>
         </form>
       </section>

@@ -25,7 +25,7 @@ function saveStoredIdentity(id, name) {
 }
 let storedRoom = readStoredIdentity();
 const participantId = storedRoom?.participant_id || params.get("participant_id") || crypto.randomUUID();
-const participantName = storedRoom?.participant_name || params.get("name") || "Guest";
+const participantName = params.get("name") || storedRoom?.participant_name || "Guest";
 let hostRecoveryToken = readHostRecoveryToken();
 const status = document.querySelector("#connection-status");
 const list = document.querySelector("#participant-list");
@@ -422,6 +422,7 @@ function connect() {
         }
         if (data.type === "playback_state") receivePlaybackState(data);
         if (data.type === "participant_joined") message.textContent = `${data.participant.name} joined the room.`;
+        if (data.type === "participant_updated") message.textContent = `${data.participant.name} changed their display name.`;
         if (data.type === "participant_left") message.textContent = "A participant left the room.";
         if (data.type === "chat_message") renderChatMessage(data);
         if (data.type === "reaction") renderReaction(data);
@@ -435,21 +436,24 @@ function connect() {
         status.classList.remove("online");
         if ([4403, 4409, 4404].includes(event.code)) {
             status.textContent = "Room identity needs attention";
+            identityRecoveryLink.hidden = true;
             if (event.code === 4404) {
                 message.textContent = "This room is no longer available. Return home to create or join another room.";
                 identityRecoveryLink.href = "/";
                 identityRecoveryLink.textContent = "Return home";
+                identityRecoveryLink.hidden = false;
             } else {
-                message.textContent = event.reason || "Your saved room identity could not be verified. Re-enter your name to join as a guest.";
-                identityRecoveryLink.href = `/?room_code=${encodeURIComponent(normalizedRoomCode)}`;
-                identityRecoveryLink.textContent = "Re-enter your name";
+                message.textContent = event.reason || "Your saved room identity could not be verified. This room session cannot be restored.";
             }
-            identityRecoveryLink.hidden = false;
-            try {
-                localStorage.removeItem(identityStorageKey);
-                localStorage.removeItem(recoveryStorageKey);
-            } catch { /* Leave the recovery page available even if cleanup fails. */ }
-            try { sessionStorage.removeItem(recoveryStorageKey); } catch { /* Storage may be unavailable. */ }
+            // A 4409 is a name collision; keep the saved identity and host
+            // proof so the user can return to the join form and choose a name.
+            if (event.code !== 4409) {
+                try {
+                    localStorage.removeItem(identityStorageKey);
+                    localStorage.removeItem(recoveryStorageKey);
+                } catch { /* Leave the recovery page available if cleanup fails. */ }
+                try { sessionStorage.removeItem(recoveryStorageKey); } catch { /* Storage may be unavailable. */ }
+            }
             return;
         }
         if (!startSyncedPlaybackButton.hidden) showSyncedPlaybackButton();

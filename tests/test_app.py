@@ -75,7 +75,7 @@ def connect_guest(client: TestClient, room: dict[str, str], participant_name: st
 
 
 def host_ws_url(room: dict[str, str], name: str | None = None) -> str:
-    suffix = f"&name={name}" if name else ""
+    suffix = f"&name={name or room['participant_name']}"
     return (
         f"/ws/rooms/{room['code']}?participant_id={room['participant_id']}{suffix}"
     )
@@ -179,24 +179,70 @@ def test_same_display_name_is_allowed_in_separate_rooms() -> None:
     assert second_join.status_code == 201
 
 
-def test_reconnecting_participant_keeps_existing_identity_and_name() -> None:
+def test_reconnecting_participant_keeps_id_and_uses_requested_name() -> None:
     store = RoomStore()
     room, host = store.create_room("Host")
     participant = store.add_participant(room.code, "Sad")
-    _, connected, first_join = store.connect_participant(
+    _, connected, first_join, first_name_changed = store.connect_participant(
         room.code, participant.id, "Sad"
     )
     store.disconnect_participant(room.code, participant.id)
 
-    _, reconnected, joined_again = store.connect_participant(
+    _, reconnected, joined_again, name_changed = store.connect_participant(
         room.code, participant.id, "sAD"
     )
 
     assert first_join is True
+    assert first_name_changed is False
     assert joined_again is True
+    assert name_changed is True
     assert connected.id == reconnected.id == participant.id
-    assert reconnected.name == "Sad"
+    assert reconnected.name == "sAD"
     assert host.id != reconnected.id
+
+
+def test_renaming_existing_participant_rejects_another_participants_name() -> None:
+    room_store = RoomStore()
+    room, _ = room_store.create_room("Host")
+    first = room_store.add_participant(room.code, "Sad")
+    second = room_store.add_participant(room.code, "Rohan")
+    with pytest.raises(DuplicateParticipantNameError):
+        room_store.connect_participant(room.code, second.id, "SAD")
+    assert first.name == "Sad"
+    assert second.name == "Rohan"
+
+
+def test_websocket_reconnect_renames_participant_and_broadcasts_update() -> None:
+    from urllib.parse import quote
+
+    with TestClient(app) as client:
+        room = create_room(client, "Host")
+        guest, guest_url = connect_guest(client, room, "Rohan")
+        with client.websocket_connect(host_ws_url(room, "Host")) as host_socket:
+            consume_initial_room_messages(host_socket)
+            with client.websocket_connect(guest_url) as guest_socket:
+                assert guest_socket.receive_json()["type"] == "room_state"
+                assert host_socket.receive_json()["type"] == "participant_joined"
+                assert host_socket.receive_json()["type"] == "room_state"
+
+                renamed_url = (
+                    f"/ws/rooms/{room['code']}?participant_id={guest['participant_id']}"
+                    f"&name={quote('Rohan New')}"
+                )
+                with client.websocket_connect(renamed_url) as renamed_socket:
+                    assert renamed_socket.receive_json()["type"] == "room_state"
+                    updated = host_socket.receive_json()
+                    assert updated["type"] == "participant_updated"
+                    assert updated["participant"]["name"] == "Rohan New"
+                    snapshot = host_socket.receive_json()
+                    assert snapshot["type"] == "room_state"
+                    assert any(
+                        participant["name"] == "Rohan New"
+                        for participant in snapshot["participants"]
+                    )
+                    assert renamed_socket.receive_json()["type"] == "participant_updated"
+                    assert renamed_socket.receive_json()["type"] == "room_state"
+                    assert renamed_socket.receive_json()["type"] == "playback_state"
 
 
 def test_new_websocket_identity_with_duplicate_name_is_rejected() -> None:
@@ -630,7 +676,7 @@ def test_host_disconnect_is_hostless_until_same_identity_reconnects() -> None:
 
     # A refresh and a permanent tab close look identical. Do not transfer the
     # role automatically; the same stable participant ID restores it on reconnect.
-    _, reconnected, _ = room_store.connect_participant(room.code, host.id, "Host")
+    _, reconnected, _, _ = room_store.connect_participant(room.code, host.id, "Host")
     assert reconnected.id == host.id
     assert room.snapshot()["host_id"] == host.id
     assert len(room.participants) == 2

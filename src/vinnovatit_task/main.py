@@ -158,7 +158,7 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
     try:
         # Resolve identity/name before registering a socket, so a rejected
         # duplicate WebSocket cannot appear in the room's connection manager.
-        room, participant, joined = store.connect_participant(
+        room, participant, joined, name_changed = store.connect_participant(
             room_code, participant_id, participant_name, recovery_token
         )
     except DuplicateParticipantNameError as error:
@@ -176,6 +176,12 @@ async def room_websocket(websocket: WebSocket, room_code: str) -> None:
             room_code,
             {"type": "participant_joined", "participant": participant.as_dict()},
         )
+    elif name_changed:
+        await connections.broadcast(
+            room_code,
+            {"type": "participant_updated", "participant": participant.as_dict()},
+        )
+    if joined or name_changed:
         await connections.broadcast(
             room_code, {"type": "room_state", **room.snapshot()}
         )
